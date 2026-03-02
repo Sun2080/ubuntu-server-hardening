@@ -223,6 +223,14 @@ net.ipv4.tcp_sack = 1
 EOF
 
     if [[ "$DRY_RUN" != "yes" ]]; then
+        # 处理 /etc/sysctl.conf 中的冲突项（sysctl.conf 加载优先级最高会覆盖 .d/ 下的配置）
+        local conflicts=("net.core.somaxconn" "net.ipv4.tcp_max_tw_buckets" "net.ipv4.tcp_slow_start_after_idle")
+        for key in "${conflicts[@]}"; do
+            if grep -qE "^${key}" /etc/sysctl.conf 2>/dev/null; then
+                sed -i "s|^${key}|# ${key}|" /etc/sysctl.conf
+                log "INFO" "已注释 /etc/sysctl.conf 中的冲突项: $key (由 99-web-optimize.conf 管理)"
+            fi
+        done
         sysctl --system >/dev/null 2>&1
         log "INFO" "内核网络参数已应用 (BBR, TCP优化, somaxconn=$SYSCTL_SOMAXCONN)"
     else
@@ -785,10 +793,20 @@ generate_mariadb_config() {
     local total_mem
     total_mem=$(get_total_mem_mb)
 
-    # InnoDB buffer_pool = 系统内存 × 20%
-    local buffer_pool_mb=$(( total_mem * 20 / 100 ))
+    # InnoDB buffer_pool 自适应计算
+    # 小服务器 (<=4GB): 系统内存 × 10%
+    # 中型服务器 (4-16GB): 系统内存 × 20%
+    # 大型服务器 (>16GB): 系统内存 × 30%
+    local buffer_pool_mb
+    if [[ $total_mem -le 4096 ]]; then
+        buffer_pool_mb=$(( total_mem * 10 / 100 ))
+    elif [[ $total_mem -le 16384 ]]; then
+        buffer_pool_mb=$(( total_mem * 20 / 100 ))
+    else
+        buffer_pool_mb=$(( total_mem * 30 / 100 ))
+    fi
     [[ $buffer_pool_mb -lt 128 ]] && buffer_pool_mb=128
-    [[ $buffer_pool_mb -gt 4096 ]] && buffer_pool_mb=4096
+    [[ $buffer_pool_mb -gt 8192 ]] && buffer_pool_mb=8192
 
     local mariadb_dir="$OUTPUT_DIR/mariadb"
 
@@ -847,7 +865,7 @@ min_examined_row_limit = 100
 local_infile = 0
 symbolic-links = 0
 skip-name-resolve
-sql_mode = STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION
+sql_mode = STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
 
 # 字符集
 character-set-server = utf8mb4
@@ -970,25 +988,45 @@ HEADER
 
     # Nginx/OpenResty
     if [[ -n "$NGINX_CONTAINER" ]]; then
+        # 检测 1Panel 管理的 OpenResty 配置路径
+        local nginx_host_conf=""
+        local nginx_host_log=""
+        local nginx_host_confd=""
+        if [[ -f /opt/1panel/apps/openresty/openresty/conf/nginx.conf ]]; then
+            nginx_host_conf="/opt/1panel/apps/openresty/openresty/conf/nginx.conf"
+            nginx_host_log="/opt/1panel/apps/openresty/openresty/log"
+            nginx_host_confd="/opt/1panel/www/conf.d"
+            log "INFO" "检测到 1Panel 管理的 OpenResty，使用宿主机挂载路径"
+        fi
+
         cat >> "$APPLY_SCRIPT" << EOF
 
 # ═══ Nginx/OpenResty: $NGINX_CONTAINER ═══
 log "应用 Nginx/OpenResty 配置到容器: $NGINX_CONTAINER"
 
 # 备份原始配置
-backup_from_container "$NGINX_CONTAINER" "/etc/nginx/nginx.conf" "nginx.conf"
-backup_from_container "$NGINX_CONTAINER" "/etc/nginx/conf.d/" "conf.d"
+EOF
+        if [[ -n "$nginx_host_conf" ]]; then
+            cat >> "$APPLY_SCRIPT" << EOF
+cp -a "$nginx_host_conf" "\$BACKUP_DIR/nginx.conf.bak" 2>/dev/null || true
 
-# 创建缓存目录
+# 复制安全头和敏感文件拦截配置到 conf.d主机目录
+# 注意: 主配置 nginx.conf 由 1Panel 管理，不直接覆盖
+cp "\$OUTPUT_DIR/nginx/security-headers.conf" "$nginx_host_confd/security-headers.conf" 2>/dev/null || true
+cp "\$OUTPUT_DIR/nginx/block-sensitive.conf" "$nginx_host_confd/block-sensitive.conf" 2>/dev/null || true
+log "已复制安全头和敏感文件拦截配置到 $nginx_host_confd"
+
+# 重载 OpenResty
+docker exec "$NGINX_CONTAINER" nginx -t 2>&1 && docker exec "$NGINX_CONTAINER" nginx -s reload && log "OpenResty 配置已重载" || err "OpenResty 配置验证失败"
+EOF
+        else
+            cat >> "$APPLY_SCRIPT" << EOF
+backup_from_container "$NGINX_CONTAINER" "/usr/local/openresty/nginx/conf/nginx.conf" "nginx.conf"
+
 docker exec "$NGINX_CONTAINER" mkdir -p /var/cache/nginx/fastcgi /var/cache/nginx/fastcgi_temp 2>/dev/null || true
+docker cp "\$OUTPUT_DIR/nginx/security-headers.conf" "$NGINX_CONTAINER:/usr/local/openresty/nginx/conf/conf.d/security-headers.conf"
+docker cp "\$OUTPUT_DIR/nginx/block-sensitive.conf" "$NGINX_CONTAINER:/usr/local/openresty/nginx/conf/conf.d/block-sensitive.conf"
 
-# 复制配置
-docker cp "$OUTPUT_DIR/nginx/nginx.conf" "$NGINX_CONTAINER:/etc/nginx/nginx.conf"
-docker cp "$OUTPUT_DIR/nginx/security-headers.conf" "$NGINX_CONTAINER:/etc/nginx/conf.d/security-headers.conf"
-docker cp "$OUTPUT_DIR/nginx/block-sensitive.conf" "$NGINX_CONTAINER:/etc/nginx/conf.d/block-sensitive.conf"
-docker cp "$OUTPUT_DIR/nginx/static-cache.conf" "$NGINX_CONTAINER:/etc/nginx/conf.d/static-cache.conf"
-
-# 验证配置
 if docker exec "$NGINX_CONTAINER" nginx -t 2>&1; then
     docker exec "$NGINX_CONTAINER" nginx -s reload
     log "Nginx 配置已应用并重载"
@@ -996,64 +1034,109 @@ else
     err "Nginx 配置验证失败，请检查配置文件"
 fi
 EOF
+        fi
     fi
 
     # PHP-FPM
     if [[ -n "$PHP_CONTAINER" ]]; then
-        # 尝试检测 PHP 配置路径
-        local php_conf_dir
-        php_conf_dir=$(docker exec "$PHP_CONTAINER" sh -c 'php -i 2>/dev/null | grep "Scan this dir" | head -1 | awk -F"=>" "{print \$2}" | xargs' 2>/dev/null || echo "/usr/local/etc/php/conf.d")
+        # 检测 1Panel 管理的 PHP-FPM 配置路径
+        local php_host_confd=""
+        local php_host_fpm_conf=""
+        if [[ -d /opt/1panel/runtime/php/PHP/conf/conf.d ]]; then
+            php_host_confd="/opt/1panel/runtime/php/PHP/conf/conf.d"
+            php_host_fpm_conf="/opt/1panel/runtime/php/PHP/conf/php-fpm.conf"
+            log "INFO" "检测到 1Panel 管理的 PHP-FPM，使用宿主机挂载路径"
+        fi
+
+        # 检测 PHP www.conf 在容器内的实际路径
         local php_fpm_conf
         php_fpm_conf=$(docker exec "$PHP_CONTAINER" sh -c 'find /usr/local/etc/php-fpm.d /etc/php-fpm.d /etc/php /usr/local/etc -name "www.conf" -type f 2>/dev/null | head -1' 2>/dev/null || echo "/usr/local/etc/php-fpm.d/www.conf")
+        local php_conf_dir
+        php_conf_dir=$(docker exec "$PHP_CONTAINER" sh -c 'php -i 2>/dev/null | grep "Scan this dir" | head -1 | awk -F"=>" "{print \$2}" | xargs' 2>/dev/null || echo "/usr/local/etc/php/conf.d")
 
         cat >> "$APPLY_SCRIPT" << EOF
 
 # ═══ PHP-FPM: $PHP_CONTAINER ═══
 log "应用 PHP-FPM 配置到容器: $PHP_CONTAINER"
+EOF
+        if [[ -n "$php_host_confd" ]]; then
+            cat >> "$APPLY_SCRIPT" << EOF
 
-# 备份原始配置
+# 1Panel 管理的 PHP-FPM: 通过宿主机挂载目录复制配置
+cp -a "$php_host_confd" "\$BACKUP_DIR/php-conf.d.bak" 2>/dev/null || true
+cp "\$OUTPUT_DIR/php/opcache.ini" "$php_host_confd/99-opcache.ini"
+cp "\$OUTPUT_DIR/php/security.ini" "$php_host_confd/99-security.ini"
+cp "\$OUTPUT_DIR/php/session-security.ini" "$php_host_confd/99-session.ini"
+log "PHP 配置已复制到 $php_host_confd"
+
+# 重启 PHP-FPM 容器
+docker restart "$PHP_CONTAINER"
+log "PHP-FPM 容器已重启"
+EOF
+        else
+            cat >> "$APPLY_SCRIPT" << EOF
+
 backup_from_container "$PHP_CONTAINER" "$php_fpm_conf" "www.conf"
 backup_from_container "$PHP_CONTAINER" "$php_conf_dir" "conf.d"
-
-# 创建日志目录
 docker exec "$PHP_CONTAINER" mkdir -p /var/log/php-fpm 2>/dev/null || true
-
-# 复制配置
-docker cp "$OUTPUT_DIR/php/www.conf" "$PHP_CONTAINER:$php_fpm_conf"
-docker cp "$OUTPUT_DIR/php/opcache.ini" "$PHP_CONTAINER:$php_conf_dir/99-opcache.ini"
-docker cp "$OUTPUT_DIR/php/security.ini" "$PHP_CONTAINER:$php_conf_dir/99-security.ini"
-docker cp "$OUTPUT_DIR/php/session-security.ini" "$PHP_CONTAINER:$php_conf_dir/99-session.ini"
-
-# 重启 PHP-FPM
+docker cp "\$OUTPUT_DIR/php/www.conf" "$PHP_CONTAINER:$php_fpm_conf"
+docker cp "\$OUTPUT_DIR/php/opcache.ini" "$PHP_CONTAINER:$php_conf_dir/99-opcache.ini"
+docker cp "\$OUTPUT_DIR/php/security.ini" "$PHP_CONTAINER:$php_conf_dir/99-security.ini"
+docker cp "\$OUTPUT_DIR/php/session-security.ini" "$PHP_CONTAINER:$php_conf_dir/99-session.ini"
 docker restart "$PHP_CONTAINER"
 log "PHP-FPM 配置已应用并重启容器"
 EOF
+        fi
     fi
 
     # MariaDB/MySQL
     if [[ -n "$MARIADB_CONTAINER" ]]; then
-        local mysql_conf_path
-        mysql_conf_path=$(docker exec "$MARIADB_CONTAINER" sh -c 'find /etc/mysql/conf.d /etc/mysql/mariadb.conf.d /etc/my.cnf.d -type d 2>/dev/null | head -1' 2>/dev/null || echo "/etc/mysql/conf.d")
+        # 检测 1Panel 管理的 MariaDB 配置路径
+        local mariadb_host_conf=""
+        if [[ -f /opt/1panel/apps/mariadb/mariadb/conf/my.cnf ]]; then
+            mariadb_host_conf="/opt/1panel/apps/mariadb/mariadb/conf/my.cnf"
+            log "INFO" "检测到 1Panel 管理的 MariaDB，使用宿主机配置路径"
+        fi
 
         cat >> "$APPLY_SCRIPT" << EOF
 
-# ═══ MariaDB/MySQL: $MARIADB_CONTAINER ═══
+# ═══ MariaDB: $MARIADB_CONTAINER ═══
 log "应用 MariaDB 配置到容器: $MARIADB_CONTAINER"
+EOF
+        if [[ -n "$mariadb_host_conf" ]]; then
+            cat >> "$APPLY_SCRIPT" << EOF
 
-# 备份原始配置
-backup_from_container "$MARIADB_CONTAINER" "$mysql_conf_path" "conf.d"
+# 1Panel 管理的 MariaDB: 将优化配置追加到宿主机 my.cnf
+cp -a "$mariadb_host_conf" "\$BACKUP_DIR/mariadb-my.cnf.bak" 2>/dev/null || true
 
-# 创建日志目录
-docker exec "$MARIADB_CONTAINER" mkdir -p /var/log/mysql 2>/dev/null || true
-docker exec "$MARIADB_CONTAINER" chown mysql:mysql /var/log/mysql 2>/dev/null || true
+# 将生成的优化配置以 !includedir 方式引入
+mkdir -p /opt/1panel/apps/mariadb/mariadb/conf/conf.d
+cp "\$OUTPUT_DIR/mariadb/custom.cnf" "/opt/1panel/apps/mariadb/mariadb/conf/conf.d/zz-optimize.cnf"
 
-# 复制配置
-docker cp "$OUTPUT_DIR/mariadb/custom.cnf" "$MARIADB_CONTAINER:$mysql_conf_path/zz-optimize.cnf"
+# 检查 my.cnf 是否已包含 includedir
+if ! grep -q 'includedir.*conf.d' "$mariadb_host_conf" 2>/dev/null; then
+    echo '' >> "$mariadb_host_conf"
+    echo '!includedir /etc/mysql/conf.d/' >> "$mariadb_host_conf"
+    log "已添加 includedir 到 my.cnf"
+fi
 
-# 重启容器（MySQL 需要重启才能加载新配置）
+# 重启 MariaDB 容器
 docker restart "$MARIADB_CONTAINER"
 log "MariaDB 配置已应用并重启容器"
 EOF
+        else
+            local mysql_conf_path
+            mysql_conf_path=$(docker exec "$MARIADB_CONTAINER" sh -c 'find /etc/mysql/conf.d /etc/mysql/mariadb.conf.d /etc/my.cnf.d -type d 2>/dev/null | head -1' 2>/dev/null || echo "/etc/mysql/conf.d")
+            cat >> "$APPLY_SCRIPT" << EOF
+
+backup_from_container "$MARIADB_CONTAINER" "$mysql_conf_path" "conf.d"
+docker exec "$MARIADB_CONTAINER" mkdir -p /var/log/mysql 2>/dev/null || true
+docker exec "$MARIADB_CONTAINER" chown mysql:mysql /var/log/mysql 2>/dev/null || true
+docker cp "\$OUTPUT_DIR/mariadb/custom.cnf" "$MARIADB_CONTAINER:$mysql_conf_path/zz-optimize.cnf"
+docker restart "$MARIADB_CONTAINER"
+log "MariaDB 配置已应用并重启容器"
+EOF
+        fi
     fi
 
     # Redis
@@ -1371,8 +1454,10 @@ run_verification() {
         "$([[ -f $OUTPUT_DIR/php/www.conf ]] && echo pass || echo fail)"
     check_result "MariaDB 配置已生成" \
         "$([[ -f $OUTPUT_DIR/mariadb/custom.cnf ]] && echo pass || echo fail)"
-    check_result "Redis 配置已生成" \
-        "$([[ -f $OUTPUT_DIR/redis/custom.conf ]] && echo pass || echo fail)"
+    if [[ -n "$REDIS_CONTAINER" ]]; then
+        check_result "Redis 配置已生成" \
+            "$([[ -f $OUTPUT_DIR/redis/custom.conf ]] && echo pass || echo fail)"
+    fi
     check_result "配置应用脚本已生成" \
         "$([[ -f $APPLY_SCRIPT ]] && echo pass || echo fail)"
 

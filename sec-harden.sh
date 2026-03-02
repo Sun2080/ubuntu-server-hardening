@@ -31,6 +31,8 @@ ALLOW_HTTP="${ALLOW_HTTP:-yes}"            # yes | no
 DISABLE_IPV6="${DISABLE_IPV6:-no}"         # yes | no
 DISABLE_PING="${DISABLE_PING:-no}"         # yes | no
 RESTRICT_IP="${RESTRICT_IP:-}"             # 限制来源 IP，逗号分隔
+INSTALL_AIDE="${INSTALL_AIDE:-yes}"        # yes | no
+INSTALL_RKHUNTER="${INSTALL_RKHUNTER:-yes}" # yes | no
 AUTO_MODE="${AUTO_MODE:-no}"
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -254,6 +256,28 @@ harden_ssh() {
     # 写入配置
     echo -e "$ssh_config" > "$sshd_conf"
 
+    # 处理 sshd_config.d 下的 cloud-init 等覆盖配置
+    if [[ -d /etc/ssh/sshd_config.d ]]; then
+        for f in /etc/ssh/sshd_config.d/*.conf; do
+            [[ -f "$f" ]] || continue
+            backup_file "$f"
+            # 删除可能覆盖我们配置的选项
+            sed -i '/^PasswordAuthentication/d' "$f"
+            sed -i '/^PermitRootLogin/d' "$f"
+            sed -i '/^ChallengeResponseAuthentication/d' "$f"
+            sed -i '/^KbdInteractiveAuthentication/d' "$f"
+            sed -i '/^PubkeyAuthentication/d' "$f"
+            sed -i '/^MaxAuthTries/d' "$f"
+            # 如果文件变为空（仅注释/空行），则删除
+            if ! grep -qE '^\s*[^#[:space:]]' "$f" 2>/dev/null; then
+                rm -f "$f"
+                log "INFO" "已移除空的 sshd drop-in 配置: $f"
+            else
+                log "INFO" "已清理 sshd drop-in 配置冲突项: $f"
+            fi
+        done
+    fi
+
     # 生成 Ed25519 主机密钥（如果不存在）
     if [[ ! -f /etc/ssh/ssh_host_ed25519_key ]]; then
         ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key -N "" >/dev/null 2>&1
@@ -331,6 +355,31 @@ setup_ufw() {
         done
     fi
 
+    # Docker 兼容: 确保 UFW 不阻断 Docker 容器网络
+    if command -v docker &>/dev/null && systemctl is-active docker &>/dev/null; then
+        local docker_after="/etc/ufw/after.rules"
+        backup_file "$docker_after"
+        if ! grep -q 'DOCKER-USER' "$docker_after" 2>/dev/null; then
+            cat >> "$docker_after" << 'DOCKERUFW'
+
+# sec-harden.sh: Docker UFW 兼容 — 允许容器间通信和 localhost 访问
+*filter
+:ufw-user-forward - [0:0]
+-A ufw-user-forward -i docker0 -j ACCEPT
+-A ufw-user-forward -o docker0 -j ACCEPT
+-A ufw-user-forward -i br-+ -j ACCEPT
+-A ufw-user-forward -o br-+ -j ACCEPT
+COMMIT
+DOCKERUFW
+            log "INFO" "UFW: 已添加 Docker 兼容规则"
+        fi
+        # 确保 Docker iptables 不受 UFW FORWARD 策略影响
+        local ufw_default="/etc/default/ufw"
+        backup_file "$ufw_default"
+        sed -i 's/^DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' "$ufw_default" 2>/dev/null || true
+        log "INFO" "UFW: FORWARD 策略设为 ACCEPT (Docker 兼容)"
+    fi
+
     # 启用 UFW
     echo "y" | ufw enable >/dev/null 2>&1
     log "INFO" "UFW 防火墙已启用"
@@ -376,19 +425,21 @@ findtime = 86400
 maxretry = 3
 
 [nginx-limit-req]
-enabled  = true
+enabled  = false
 port     = http,https
 filter   = nginx-limit-req
-logpath  = /var/log/nginx/error.log
+logpath  = /opt/1panel/apps/openresty/openresty/log/error.log
 maxretry = 5
 bantime  = 3600
 findtime = 120
+# 注意: Nginx 在 Docker 容器内运行，日志路径取决于 1Panel 挂载点
+# 如果日志路径不存在，Fail2ban 将自动忽略此 jail
 
 [nginx-botsearch]
-enabled  = true
+enabled  = false
 port     = http,https
 filter   = nginx-botsearch
-logpath  = /var/log/nginx/access.log
+logpath  = /opt/1panel/apps/openresty/openresty/log/access.log
 maxretry = 3
 bantime  = 86400
 findtime = 60
@@ -944,7 +995,20 @@ harden_shell() {
     # TMOUT 超时
     local profile_sec="/etc/profile.d/sec-harden.sh"
     backup_file "$profile_sec"
-    cat > "$profile_sec" << EOF
+
+    if [[ "$SSH_MODE" == "dev" ]]; then
+        cat > "$profile_sec" << 'EOF'
+# === sec-harden.sh Shell 安全 (开发模式) ===
+# 开发模式: 不设置 TMOUT (兼容 VSCode Remote-SSH / Copilot)
+
+# 安全别名
+alias rm='rm -i'
+alias cp='cp -i'
+alias mv='mv -i'
+EOF
+        log "INFO" "开发模式: 跳过 TMOUT 设置 (兼容 VSCode)"
+    else
+        cat > "$profile_sec" << EOF
 # === sec-harden.sh Shell 安全 ===
 # 会话超时 (秒)
 readonly TMOUT=${SHELL_TMOUT}
@@ -955,6 +1019,7 @@ alias rm='rm -i'
 alias cp='cp -i'
 alias mv='mv -i'
 EOF
+    fi
     chmod 644 "$profile_sec"
 
     # 登录警告横幅
@@ -1387,8 +1452,16 @@ main() {
     harden_tmp
     restrict_su
     harden_shell
-    setup_aide
-    setup_rkhunter
+    if [[ "$INSTALL_AIDE" == "yes" ]]; then
+        setup_aide
+    else
+        log "INFO" "跳过 AIDE 安装 (INSTALL_AIDE=$INSTALL_AIDE)"
+    fi
+    if [[ "$INSTALL_RKHUNTER" == "yes" ]]; then
+        setup_rkhunter
+    else
+        log "INFO" "跳过 rkhunter 安装 (INSTALL_RKHUNTER=$INSTALL_RKHUNTER)"
+    fi
     lockdown_mta
 
     # 完成回滚脚本
