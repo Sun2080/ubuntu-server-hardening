@@ -9,6 +9,7 @@
 #    sudo bash web-optimize.sh --dry-run        # 仅生成配置不应用
 ###############################################################################
 set -Euo pipefail
+VERSION="3.0"
 
 trap '_err_handler $LINENO "$BASH_COMMAND"' ERR
 _err_handler() {
@@ -783,8 +784,10 @@ log_errors = On
 error_log = /var/log/php-fpm/php_errors.log
 error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
 
-; 危险函数禁用
-disable_functions = exec,passthru,shell_exec,system,proc_open,popen,proc_get_status,proc_close,proc_nice,proc_terminate,pcntl_exec,pcntl_fork,dl
+; 危险函数禁用 (保留 proc_open/exec 以兼容 Composer/WP-CLI/WP-Cron)
+disable_functions = passthru,shell_exec,system,popen,proc_get_status,proc_close,proc_nice,proc_terminate,pcntl_exec,pcntl_fork,dl
+; 如不使用 Composer/WP-CLI，可改用更严格的列表:
+; disable_functions = exec,passthru,shell_exec,system,proc_open,popen,proc_get_status,proc_close,proc_nice,proc_terminate,pcntl_exec,pcntl_fork,dl
 
 ; 资源限制
 memory_limit = ${PHP_MEMORY_LIMIT}
@@ -882,9 +885,11 @@ thread_cache_size = 16
 back_log = 128
 
 # === E20: 查询优化 ===
-query_cache_type = 1
-query_cache_size = 32M
-query_cache_limit = 2M
+# 注意: query_cache 在 MariaDB 10.1.7+ 已弃用, 10.11+ 已完全移除
+# 如使用 MariaDB < 10.11, 可取消注释:
+# query_cache_type = 1
+# query_cache_size = 32M
+# query_cache_limit = 2M
 tmp_table_size = 64M
 max_heap_table_size = 64M
 sort_buffer_size = 2M
@@ -1013,6 +1018,7 @@ log() { printf "${GREEN}[%s] %s${NC}\n" "$(date '+%H:%M:%S')" "$*"; }
 warn() { printf "${YELLOW}[%s] ⚠ %s${NC}\n" "$(date '+%H:%M:%S')" "$*"; }
 err() { printf "${RED}[%s] ✗ %s${NC}\n" "$(date '+%H:%M:%S')" "$*"; }
 
+OUTPUT_DIR="/opt/server-tuning"
 BACKUP_DIR="/root/.web-optimize-backup/docker-apply-$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$BACKUP_DIR"
 
@@ -1566,6 +1572,7 @@ generate_report() {
     cat > "$DIAG_FILE" << YAMLEOF
 ---
 # web-optimize.sh 诊断报告
+version: "$VERSION"
 generated_at: "$(date -Iseconds)"
 hostname: "$(hostname)"
 os: "$(. /etc/os-release && echo "$PRETTY_NAME")"
@@ -1753,6 +1760,8 @@ main() {
             --dry-run) DRY_RUN="yes" ;;
             --force) FORCE_MODE="yes" ;;
             --help|-h)
+                echo "web-optimize.sh v$VERSION — Web 服务器性能优化脚本"
+                echo ""
                 echo "用法:"
                 echo "  sudo bash $0                  # 交互模式"
                 echo "  sudo bash $0 --auto           # 自动执行（危险操作仍需确认）"
@@ -1768,7 +1777,7 @@ main() {
 
     printf "${BOLD}${GREEN}"
     printf "╔═══════════════════════════════════════════════════════════════╗\n"
-    printf "║         Web 服务器性能优化脚本 web-optimize.sh              ║\n"
+    printf "║     Web 服务器性能优化脚本 web-optimize.sh v$VERSION        ║\n"
     printf "╚═══════════════════════════════════════════════════════════════╝\n"
     printf "${NC}\n"
 

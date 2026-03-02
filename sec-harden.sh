@@ -9,6 +9,7 @@
 #    SSH_MODE=dev sudo bash sec-harden.sh --auto  # 开发模式
 ###############################################################################
 set -Euo pipefail
+VERSION="3.0"
 
 # ─── ERR trap ────────────────────────────────────────────────────────────────
 trap '_err_handler $LINENO "$BASH_COMMAND"' ERR
@@ -350,7 +351,7 @@ harden_ssh() {
 setup_ufw() {
     step_banner 2 "UFW 防火墙"
     
-    apt-get install -y ufw >/dev/null 2>&1 || true
+    apt-get install -y --no-install-recommends ufw >/dev/null 2>&1 || true
 
     # 备份现有规则
     if [[ -f /etc/ufw/user.rules ]]; then
@@ -446,7 +447,7 @@ DOCKERUFW
 setup_fail2ban() {
     step_banner 3 "Fail2ban 防暴力破解"
 
-    apt-get install -y fail2ban >/dev/null 2>&1 || true
+    apt-get install -y --no-install-recommends fail2ban >/dev/null 2>&1 || true
 
     backup_file "/etc/fail2ban/jail.local"
 
@@ -595,7 +596,8 @@ kernel.sysrq = 0
 
 # 禁止非特权用户使用 bpf / userfaultfd
 kernel.unprivileged_bpf_disabled = 1
-kernel.unprivileged_userns_clone = 0
+# kernel.unprivileged_userns_clone — 仅 Debian/Ubuntu 特定内核补丁, 标准 Ubuntu 24.04 内核不存在此选项
+# 如内核支持则取消注释: kernel.unprivileged_userns_clone = 0
 EOF
 
     # 可选: 禁止 ICMP ping
@@ -714,7 +716,7 @@ EOF
 setup_password_policy() {
     step_banner 7 "密码策略"
 
-    apt-get install -y libpam-pwquality >/dev/null 2>&1 || true
+    apt-get install -y --no-install-recommends libpam-pwquality >/dev/null 2>&1 || true
 
     # pwquality 配置
     local pwq="/etc/security/pwquality.conf"
@@ -869,7 +871,7 @@ minimize_services() {
 setup_auditd() {
     step_banner 10 "审计日志 auditd"
 
-    apt-get install -y auditd audispd-plugins >/dev/null 2>&1 || true
+    apt-get install -y --no-install-recommends auditd audispd-plugins >/dev/null 2>&1 || true
 
     local audit_rules="/etc/audit/rules.d/sec-harden.rules"
     backup_file "$audit_rules"
@@ -936,7 +938,7 @@ EOF
 setup_auto_updates() {
     step_banner 11 "自动安全更新"
 
-    apt-get install -y unattended-upgrades apt-listchanges >/dev/null 2>&1 || true
+    apt-get install -y --no-install-recommends unattended-upgrades apt-listchanges >/dev/null 2>&1 || true
 
     local auto_conf="/etc/apt/apt.conf.d/20auto-upgrades"
     backup_file "$auto_conf"
@@ -1129,12 +1131,25 @@ EOF
     backup_file "$issue"
     cp "$issue_net" "$issue"
 
-    # hosts.deny
+    # hosts.deny (排除 localhost 和 Docker 网段)
     local hosts_deny="/etc/hosts.deny"
     backup_file "$hosts_deny"
     if ! grep -q 'ALL: ALL' "$hosts_deny" 2>/dev/null; then
         echo "ALL: ALL" >> "$hosts_deny"
         log "INFO" "hosts.deny: ALL: ALL"
+    fi
+    # hosts.allow — 确保 localhost 和 Docker 不受 hosts.deny 影响
+    local hosts_allow="/etc/hosts.allow"
+    backup_file "$hosts_allow"
+    if ! grep -q '127.0.0.1' "$hosts_allow" 2>/dev/null; then
+        cat >> "$hosts_allow" << 'HOSTALLOW'
+# sec-harden.sh: 允许本地和 Docker 内部访问
+ALL: 127.0.0.1
+ALL: 172.16.0.0/12
+ALL: 192.168.0.0/16
+ALL: 10.0.0.0/8
+HOSTALLOW
+        log "INFO" "hosts.allow: 已添加本地/Docker 白名单"
     fi
 
     log "INFO" "Shell 安全: TMOUT=$SHELL_TMOUT, Banner 已设置"
@@ -1148,11 +1163,13 @@ EOF
 setup_aide() {
     step_banner 16 "AIDE 文件完整性检测"
 
-    apt-get install -y aide aide-common >/dev/null 2>&1 || true
+    apt-get install -y --no-install-recommends aide aide-common >/dev/null 2>&1 || true
 
-    # 初始化数据库
-    log "INFO" "正在初始化 AIDE 数据库（可能需要几分钟）..."
-    aideinit 2>/dev/null || aide --init 2>/dev/null || true
+    # 初始化数据库 (超时 300 秒以防止卡死)
+    log "INFO" "正在初始化 AIDE 数据库（可能需要几分钟…）"
+    timeout 300 aideinit 2>/dev/null || timeout 300 aide --init 2>/dev/null || {
+        log "WARN" "AIDE 初始化超时或失败，可稍后手动运行: aideinit"
+    }
 
     # 如果生成了新数据库，移动到正确位置
     if [[ -f /var/lib/aide/aide.db.new ]]; then
@@ -1183,7 +1200,7 @@ AIDECRON
 setup_rkhunter() {
     step_banner 17 "rkhunter rootkit 检测"
 
-    apt-get install -y rkhunter >/dev/null 2>&1 || true
+    apt-get install -y --no-install-recommends rkhunter >/dev/null 2>&1 || true
 
     # 更新数据库
     rkhunter --update 2>/dev/null || true
@@ -1330,6 +1347,7 @@ generate_report() {
     cat > "$DIAG_FILE" << YAMLEOF
 ---
 # sec-harden.sh 诊断报告
+version: "$VERSION"
 generated_at: "$(date -Iseconds)"
 hostname: "$(hostname)"
 os: "$(. /etc/os-release && echo "$PRETTY_NAME")"
@@ -1582,6 +1600,8 @@ main() {
             --auto) AUTO_MODE="yes" ;;
             --force) FORCE_MODE="yes" ;;
             --help|-h)
+                echo "sec-harden.sh v$VERSION — Ubuntu 服务器安全加固脚本"
+                echo ""
                 echo "用法:"
                 echo "  sudo bash $0                  # 交互模式"
                 echo "  sudo bash $0 --auto           # 自动执行（危险操作仍需确认）"
@@ -1598,7 +1618,7 @@ main() {
 
     printf "${BOLD}${GREEN}"
     printf "╔═══════════════════════════════════════════════════════════════╗\n"
-    printf "║           Ubuntu 服务器安全加固脚本 sec-harden.sh           ║\n"
+    printf "║       Ubuntu 服务器安全加固脚本 sec-harden.sh v$VERSION      ║\n"
     printf "╚═══════════════════════════════════════════════════════════════╝\n"
     printf "${NC}\n"
 
