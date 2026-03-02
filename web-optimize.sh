@@ -150,7 +150,6 @@ check_os() {
 init_dirs() {
     mkdir -p "$BACKUP_DIR"
     mkdir -p "$OUTPUT_DIR"/{nginx,php,mariadb,redis}
-    mkdir -p /opt/scripts
 
     cat > "$ROLLBACK_SCRIPT" << 'ROLLBACK_HEADER'
 #!/usr/bin/env bash
@@ -1263,253 +1262,6 @@ FOOTER
 }
 
 ###############################################################################
-#  H27: 健康检查脚本
-###############################################################################
-generate_health_check() {
-    step_banner "H27" "健康检查脚本"
-
-    cat > /opt/scripts/health-check.sh << 'HEALTHEOF'
-#!/usr/bin/env bash
-###############################################################################
-#  health-check.sh — 系统健康检查 (每5分钟执行)
-###############################################################################
-set -uo pipefail
-
-LOG="/var/log/health-check.log"
-ALERT_MEM=85
-ALERT_DISK=85
-ALERT_SWAP=50
-
-ts() { date '+%Y-%m-%d %H:%M:%S'; }
-log() { echo "[$(ts)] $*" >> "$LOG"; }
-alert() { echo "[$(ts)] ⚠ ALERT: $*" >> "$LOG"; }
-
-# 内存检查
-mem_usage=$(free | awk '/Mem:/{printf "%.0f", $3/$2*100}')
-if [[ $mem_usage -gt $ALERT_MEM ]]; then
-    alert "内存使用率 ${mem_usage}% (阈值 ${ALERT_MEM}%)"
-fi
-
-# 磁盘检查
-disk_usage=$(df / | awk 'NR==2{gsub(/%/,""); print $5}')
-if [[ $disk_usage -gt $ALERT_DISK ]]; then
-    alert "磁盘使用率 ${disk_usage}% (阈值 ${ALERT_DISK}%)"
-fi
-
-# Swap 检查
-swap_total=$(free | awk '/Swap:/{print $2}')
-if [[ $swap_total -gt 0 ]]; then
-    swap_usage=$(free | awk '/Swap:/{printf "%.0f", $3/$2*100}')
-    if [[ $swap_usage -gt $ALERT_SWAP ]]; then
-        alert "Swap 使用率 ${swap_usage}% (阈值 ${ALERT_SWAP}%)"
-    fi
-fi
-
-# 系统负载
-cpu_cores=$(nproc)
-load_limit=$((cpu_cores * 2))
-load_1m=$(awk '{printf "%.0f", $1}' /proc/loadavg)
-if [[ $load_1m -gt $load_limit ]]; then
-    alert "系统负载 ${load_1m} (阈值 ${load_limit}, ${cpu_cores}核)"
-fi
-
-# Docker 容器检查
-if command -v docker &>/dev/null && docker info &>/dev/null; then
-    while IFS= read -r container; do
-        [[ -z "$container" ]] && continue
-        name=$(echo "$container" | awk '{print $NF}')
-        status=$(docker inspect --format '{{.State.Status}}' "$name" 2>/dev/null || echo "unknown")
-        restart_policy=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$name" 2>/dev/null || echo "no")
-
-        if [[ "$status" == "exited" || "$status" == "dead" ]]; then
-            alert "Docker 容器 $name 状态: $status"
-            if [[ "$restart_policy" != "no" ]]; then
-                docker restart "$name" 2>/dev/null && log "已自动重启容器: $name" || alert "容器重启失败: $name"
-            fi
-        fi
-    done < <(docker ps -a --format '{{.ID}} {{.Names}}' 2>/dev/null)
-fi
-
-# 保留最近7天日志
-if [[ -f "$LOG" ]]; then
-    tail -n 10000 "$LOG" > "${LOG}.tmp" && mv "${LOG}.tmp" "$LOG" 2>/dev/null || true
-fi
-HEALTHEOF
-
-    chmod 755 /opt/scripts/health-check.sh
-    log "INFO" "已生成健康检查脚本: /opt/scripts/health-check.sh"
-}
-
-###############################################################################
-#  H28: 自动清理脚本
-###############################################################################
-generate_auto_maintenance() {
-    step_banner "H28" "自动清理脚本"
-
-    cat > /opt/scripts/auto-maintenance.sh << 'MAINTEOF'
-#!/usr/bin/env bash
-###############################################################################
-#  auto-maintenance.sh — 自动清理维护 (每周日 4:00)
-###############################################################################
-set -uo pipefail
-
-LOG="/var/log/auto-maintenance.log"
-ts() { date '+%Y-%m-%d %H:%M:%S'; }
-log() { echo "[$(ts)] $*" >> "$LOG"; }
-
-log "=== 开始自动清理 ==="
-
-# APT 缓存清理
-apt-get autoremove -y >/dev/null 2>&1 || true
-apt-get autoclean -y >/dev/null 2>&1 || true
-log "APT 缓存已清理"
-
-# journalctl 日志 vacuum
-journalctl --vacuum-time=7d >/dev/null 2>&1 || true
-log "journalctl 日志已清理 (保留7天)"
-
-# 旧日志文件清理
-find /var/log -name "*.gz" -mtime +30 -delete 2>/dev/null || true
-find /var/log -name "*.old" -mtime +30 -delete 2>/dev/null || true
-find /var/log -name "*.[0-9]" -mtime +30 -delete 2>/dev/null || true
-log "旧日志文件已清理"
-
-# Docker 垃圾清理
-if command -v docker &>/dev/null && docker info &>/dev/null; then
-    docker system prune -f >/dev/null 2>&1 || true
-    # 清理悬空镜像
-    docker image prune -f >/dev/null 2>&1 || true
-    log "Docker 垃圾已清理"
-fi
-
-# PHP session 过期文件清理 (24小时以上)
-find /var/lib/php/sessions -name "sess_*" -mmin +1440 -delete 2>/dev/null || true
-find /tmp -name "sess_*" -mmin +1440 -delete 2>/dev/null || true
-log "PHP session 过期文件已清理"
-
-# Nginx 缓存清理 (7天以上)
-find /var/cache/nginx -type f -mtime +7 -delete 2>/dev/null || true
-log "Nginx 缓存已清理 (7天以上)"
-
-# 临时文件
-find /tmp -type f -atime +7 -delete 2>/dev/null || true
-find /var/tmp -type f -atime +7 -delete 2>/dev/null || true
-log "临时文件已清理"
-
-log "=== 清理完成 ==="
-MAINTEOF
-
-    chmod 755 /opt/scripts/auto-maintenance.sh
-    log "INFO" "已生成自动清理脚本: /opt/scripts/auto-maintenance.sh"
-}
-
-###############################################################################
-#  H29: OOM 防护
-###############################################################################
-generate_oom_protection() {
-    step_banner "H29" "OOM 防护"
-
-    cat > /opt/scripts/oom-protection.sh << 'OOMEOF'
-#!/usr/bin/env bash
-###############################################################################
-#  oom-protection.sh — OOM 防护 (每天 3:00)
-###############################################################################
-set -uo pipefail
-
-LOG="/var/log/oom-protection.log"
-ts() { date '+%Y-%m-%d %H:%M:%S'; }
-log() { echo "[$(ts)] $*" >> "$LOG"; }
-
-log "=== 刷新 OOM 防护 ==="
-
-# 确保关键 Docker 容器设置 restart=unless-stopped
-if command -v docker &>/dev/null && docker info &>/dev/null; then
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        name=$(echo "$line" | awk '{print $NF}')
-        image=$(docker inspect --format '{{.Config.Image}}' "$name" 2>/dev/null || echo "")
-        image_lower="${image,,}"
-
-        # 检查是否是关键服务
-        if [[ "$image_lower" =~ nginx|openresty|php|mariadb|mysql|redis|postgres ]]; then
-            current_policy=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$name" 2>/dev/null || echo "no")
-            if [[ "$current_policy" == "no" ]]; then
-                docker update --restart unless-stopped "$name" 2>/dev/null || true
-                log "已设置 $name restart=unless-stopped"
-            fi
-        fi
-    done < <(docker ps --format '{{.ID}} {{.Names}}' 2>/dev/null)
-fi
-
-# 主机关键进程 OOM Score 调整
-adjust_oom() {
-    local proc_name=$1 score=$2
-    pids=$(pgrep -f "$proc_name" 2>/dev/null || true)
-    for pid in $pids; do
-        if [[ -f "/proc/$pid/oom_score_adj" ]]; then
-            echo "$score" > "/proc/$pid/oom_score_adj" 2>/dev/null || true
-        fi
-    done
-}
-
-# 降低关键进程被 OOM kill 的概率
-adjust_oom "nginx" "-500"
-adjust_oom "openresty" "-500"
-adjust_oom "mariadbd\|mysqld" "-500"
-adjust_oom "redis-server" "-300"
-adjust_oom "php-fpm" "-300"
-adjust_oom "dockerd" "-900"
-adjust_oom "containerd" "-900"
-adjust_oom "1panel" "-200"
-
-log "OOM 防护刷新完成"
-
-# 保留最近30天日志
-if [[ -f "$LOG" ]]; then
-    tail -n 5000 "$LOG" > "${LOG}.tmp" && mv "${LOG}.tmp" "$LOG" 2>/dev/null || true
-fi
-OOMEOF
-
-    chmod 755 /opt/scripts/oom-protection.sh
-    log "INFO" "已生成 OOM 防护脚本: /opt/scripts/oom-protection.sh"
-}
-
-###############################################################################
-#  H30: Crontab 设置
-###############################################################################
-setup_crontab() {
-    step_banner "H30" "Crontab 定时任务"
-
-    local cron_file="/etc/cron.d/web-optimize"
-    backup_file "$cron_file"
-
-    cat > "$cron_file" << 'EOF'
-# === web-optimize.sh 定时任务 ===
-SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-# 健康检查 - 每5分钟
-*/5 * * * * root /opt/scripts/health-check.sh >/dev/null 2>&1
-
-# 自动清理 - 每周日 4:00
-0 4 * * 0 root /opt/scripts/auto-maintenance.sh >/dev/null 2>&1
-
-# OOM 防护 - 每天 3:00
-0 3 * * * root /opt/scripts/oom-protection.sh >/dev/null 2>&1
-EOF
-
-    chmod 644 "$cron_file"
-
-    if [[ "$DRY_RUN" != "yes" ]]; then
-        log "INFO" "Crontab 已配置: 健康检查(5分钟) + 清理(周日4点) + OOM防护(每天3点)"
-    else
-        log "INFO" "[DRY-RUN] 已生成 Crontab 配置"
-    fi
-
-    echo "rm -f '$cron_file' && echo '已移除定时任务'" >> "$ROLLBACK_SCRIPT"
-}
-
-###############################################################################
 #  验证
 ###############################################################################
 run_verification() {
@@ -1547,16 +1299,6 @@ run_verification() {
     fi
     check_result "配置应用脚本已生成" \
         "$([[ -f $APPLY_SCRIPT ]] && echo pass || echo fail)"
-
-    # 运维脚本
-    check_result "健康检查脚本" \
-        "$([[ -f /opt/scripts/health-check.sh && -x /opt/scripts/health-check.sh ]] && echo pass || echo fail)"
-    check_result "自动清理脚本" \
-        "$([[ -f /opt/scripts/auto-maintenance.sh && -x /opt/scripts/auto-maintenance.sh ]] && echo pass || echo fail)"
-    check_result "OOM 防护脚本" \
-        "$([[ -f /opt/scripts/oom-protection.sh && -x /opt/scripts/oom-protection.sh ]] && echo pass || echo fail)"
-    check_result "Crontab 已配置" \
-        "$([[ -f /etc/cron.d/web-optimize ]] && echo pass || echo fail)"
 
     echo "" | tee -a "$LOG_FILE"
     local rate=0
@@ -1645,7 +1387,6 @@ interactive_menu() {
     printf "    4. 禁用不必要服务\n"
     printf "    5. 检测 Docker 容器\n"
     printf "    6. 生成 Nginx/PHP/MariaDB/Redis 优化配置\n"
-    printf "    7. 生成健康检查/清理/OOM防护脚本\n"
     echo ""
 
     printf "  配置将生成到 ${YELLOW}$OUTPUT_DIR${NC}，不直接修改容器内部文件\n"
@@ -1716,8 +1457,6 @@ show_final_summary() {
         local rm; rm=$(awk '/^maxmemory /{print $2}' "$OUTPUT_DIR/redis/custom.conf" 2>/dev/null)
         printf "  ${GREEN}✓${NC} Redis 优化: maxmemory=%s, policy=%s, lazyfree\n" "${rm:-auto}" "$REDIS_POLICY" | tee -a "$LOG_FILE"
     fi
-
-    printf "  ${GREEN}✓${NC} 运维自动化: 健康检查(5分钟), 定期清理(每周), OOM防护(每天)\n" | tee -a "$LOG_FILE"
 
     # ── 检测到的容器 ──
     if [[ -n "$NGINX_CONTAINER$PHP_CONTAINER$MARIADB_CONTAINER$REDIS_CONTAINER" ]]; then
@@ -1817,12 +1556,6 @@ main() {
     # G: 生成应用脚本
     generate_apply_script
 
-    # H: 自动化运维
-    generate_health_check
-    generate_auto_maintenance
-    generate_oom_protection
-    setup_crontab
-
     # 完成回滚脚本
     echo 'echo "=== 回滚完成 ==="' >> "$ROLLBACK_SCRIPT"
     chmod 700 "$ROLLBACK_SCRIPT"
@@ -1836,11 +1569,6 @@ main() {
                 bash "$APPLY_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
             fi
         fi
-    fi
-
-    # 首次执行 OOM 防护
-    if [[ "$DRY_RUN" != "yes" ]]; then
-        bash /opt/scripts/oom-protection.sh 2>/dev/null || true
     fi
 
     # 验证
