@@ -1,13 +1,17 @@
 # Ubuntu Server Hardening & Web Optimization
 
+> **v3.0** | [CHANGELOG](CHANGELOG.md)
+
 一套面向 **Ubuntu 22.04 / 24.04 LTS** 的服务器安全加固与 Web 性能优化脚本。
 
 **特性：**
 - 🔌 **开箱即用**：拉到任意 Ubuntu 服务器即可运行，自动检测环境
 - 🐳 **Docker 自适应**：自动识别容器并通过 `docker inspect` 检测挂载路径
 - 🛡️ **安全交互**：危险操作（改 SSH 端口、启用防火墙）即使 `--auto` 也会确认
+- ⚡ **`--force` 全自动**：CI/CD 场景完全无交互
 - 📊 **前后对比**：运行后显示加固前/后状态对比表 + 详细成果清单
 - 🔄 **一键回滚**：每步备份，自动生成回滚脚本
+- ✅ **shellcheck 零警告**：经过静态分析验证
 
 ## 功能概览
 
@@ -165,7 +169,7 @@ SWAPPINESS=5 MARIADB_MAX_CONN=200 sudo bash web-optimize.sh --auto
 | **PHP** | Session | httponly、secure、strict_mode、samesite |
 | **MySQL** | InnoDB | buffer_pool=内存20%、flush_method=O_DIRECT |
 | **MySQL** | 连接 | max_connections=100、wait_timeout=600 |
-| **MySQL** | 查询 | query_cache、tmp_table_size=64M |
+| **MySQL** | 查询 | tmp_table_size=64M、join_buffer 优化 |
 | **MySQL** | 慢查询 | long_query_time=1、log_not_using_indexes |
 | **MySQL** | 安全 | local_infile=0、utf8mb4 |
 | **Redis** | 内存 | maxmemory 自动计算、allkeys-lru |
@@ -209,9 +213,10 @@ sudo bash /root/.web-optimize-backup/<时间戳>/rollback.sh
 ## 文件结构
 
 ```
-sec-harden.sh           # 安全加固脚本
-web-optimize.sh         # 性能优化脚本
+sec-harden.sh           # 安全加固脚本 (v3.0)
+web-optimize.sh         # 性能优化脚本 (v3.0)
 README.md               # 本文档
+CHANGELOG.md            # 版本变更记录
 LICENSE                  # MIT 许可证
 .gitignore              # Git 忽略规则
 ```
