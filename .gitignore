@@ -1,0 +1,23 @@
+# Logs
+*.log
+/var/log/sec-harden-*.log
+/var/log/web-optimize-*.log
+
+# Diagnostic reports
+*-diag-*.yaml
+
+# Backup directories
+.sec-harden-backup/
+.web-optimize-backup/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Editor
+.vscode/
+.idea/
+*.code-workspace
