@@ -4,6 +4,24 @@
 
 ---
 
+## [init-mirror.sh v1.0] — 2026-03-03
+
+### 新增
+- **init-mirror.sh** 独立脚本：云服务器换源 + 安全全量更新
+- 自动检测云厂商（腾讯云/阿里云/华为云），通过 metadata API + 源文件推断 + DMI 信息三重检测
+- 内网/外网镜像自动切换：内网可达时优先使用（延迟低、流量免费）
+- Ubuntu 22.04（传统 sources.list）和 24.04（DEB822 .sources）双格式兼容
+- 安全升级策略：`--force-confold` 保留现有配置文件（不覆盖 sshd_config 等）
+- `NEEDRESTART_MODE=a` 自动重启服务，无交互弹窗
+- Docker Hub 镜像加速：自动配置对应云厂商的 registry-mirrors
+- 升级后自动 `autoremove --purge` 清理孤立包
+- 内核更新后检测 `/var/run/reboot-required` 并提示重启
+- 完整备份 + 回滚脚本（APT 源 + Docker daemon.json）
+- 支持 `--auto`、`--force`、`MIRROR=`、`SKIP_UPGRADE=`、`DOCKER_MIRROR=` 环境变量
+- shellcheck 零警告
+
+---
+
 ## [3.1] — 2026-03-03
 
 ### 修复 (紧急 — SSH 锁死)
