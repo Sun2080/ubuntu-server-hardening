@@ -1,6 +1,13 @@
 # Ubuntu Server Hardening & Web Optimization
 
-一套面向 **Ubuntu 22.04 / 24.04 LTS** 的服务器安全加固与 Web 性能优化脚本，适用于 **1Panel + Docker** 环境。
+一套面向 **Ubuntu 22.04 / 24.04 LTS** 的服务器安全加固与 Web 性能优化脚本。
+
+**特性：**
+- 🔌 **开箱即用**：拉到任意 Ubuntu 服务器即可运行，自动检测环境
+- 🐳 **Docker 自适应**：自动识别容器并通过 `docker inspect` 检测挂载路径
+- 🛡️ **安全交互**：危险操作（改 SSH 端口、启用防火墙）即使 `--auto` 也会确认
+- 📊 **前后对比**：运行后显示加固前/后状态对比表 + 详细成果清单
+- 🔄 **一键回滚**：每步备份，自动生成回滚脚本
 
 ## 功能概览
 
@@ -44,15 +51,19 @@ sudo bash web-optimize.sh
 
 ```bash
 # ========== sec-harden.sh ==========
-sudo bash sec-harden.sh            # 交互模式（菜单选择）
-sudo bash sec-harden.sh --auto     # 自动全量执行
+sudo bash sec-harden.sh                  # 交互模式（菜单选择）
+sudo bash sec-harden.sh --auto           # 自动执行（危险操作仍需确认）
+sudo bash sec-harden.sh --auto --force   # 全自动无交互
 SSH_MODE=dev sudo bash sec-harden.sh --auto  # 开发模式（兼容 VSCode Remote-SSH）
 
 # ========== web-optimize.sh ==========
-sudo bash web-optimize.sh            # 交互模式
-sudo bash web-optimize.sh --auto     # 自动全量执行
-sudo bash web-optimize.sh --dry-run  # 仅生成配置不应用系统参数
+sudo bash web-optimize.sh                  # 交互模式
+sudo bash web-optimize.sh --auto           # 自动执行（危险操作仍需确认）
+sudo bash web-optimize.sh --auto --force   # 全自动无交互
+sudo bash web-optimize.sh --dry-run        # 仅生成配置不应用系统参数
 ```
+
+> **`--force` 说明**：跳过所有交互确认（适用于 CI/CD 或无人值守部署），不加 `--force` 时，SSH 端口变更、UFW 启用、Docker 容器重启等危险操作会要求手动确认。
 
 ---
 
@@ -233,8 +244,8 @@ LICENSE                  # MIT 许可证
 - **Ubuntu 22.04 LTS** (Jammy Jellyfish)
 - **Ubuntu 24.04 LTS** (Noble Numbat)
 - 需要 root 权限
-- 支持 1Panel 面板环境
-- 支持 Docker 容器化 Web 服务
+- 支持 1Panel / 宝塔 / 自定义 Docker 环境（自动检测挂载路径）
+- 支持 Docker 容器化 Web 服务（Nginx/OpenResty, PHP-FPM, MariaDB/MySQL, Redis）
 
 ---
 

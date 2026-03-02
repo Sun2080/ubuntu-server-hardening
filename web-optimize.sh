@@ -3,9 +3,10 @@
 #  web-optimize.sh — Web 服务器性能优化脚本
 #  适用系统: Ubuntu 22.04 / 24.04 LTS (Docker 容器化环境)
 #  用法:
-#    sudo bash web-optimize.sh            # 交互模式
-#    sudo bash web-optimize.sh --auto     # 自动全量
-#    sudo bash web-optimize.sh --dry-run  # 仅生成配置不应用
+#    sudo bash web-optimize.sh                  # 交互模式
+#    sudo bash web-optimize.sh --auto           # 自动执行（危险操作仍需确认）
+#    sudo bash web-optimize.sh --auto --force   # 全自动无交互
+#    sudo bash web-optimize.sh --dry-run        # 仅生成配置不应用
 ###############################################################################
 set -Euo pipefail
 
@@ -18,6 +19,7 @@ _err_handler() {
 # ─── 全局变量（均可通过环境变量覆盖）─────────────────────────────────────────
 AUTO_MODE="${AUTO_MODE:-no}"
 DRY_RUN="${DRY_RUN:-no}"
+FORCE_MODE="${FORCE_MODE:-no}"           # --force 跳过所有交互确认
 
 # 系统级
 SYSCTL_SOMAXCONN="${SYSCTL_SOMAXCONN:-65535}"
@@ -168,6 +170,38 @@ backup_file() {
         cp -a "$src" "$dest"
         echo "cp -a '${dest}' '${src}' && echo '已恢复: ${src}'" >> "$ROLLBACK_SCRIPT"
     fi
+}
+
+# ─── 危险操作确认（即使 --auto 也会询问，--force 跳过）────────────────
+confirm_dangerous() {
+    local msg=$1
+    if [[ "$FORCE_MODE" == "yes" ]]; then
+        log "INFO" "[FORCE] 跳过确认: $msg"
+        return 0
+    fi
+    echo "" | tee -a "$LOG_FILE"
+    printf "  ${YELLOW}⚠ 危险操作: %s${NC}\n" "$msg" | tee -a "$LOG_FILE"
+    printf "  ${BOLD}确认继续? [y/N]: ${NC}"
+    read -r answer </dev/tty 2>/dev/null || answer="y"
+    case "$answer" in
+        [yY]*) return 0 ;;
+        *) log "WARN" "用户取消: $msg"; return 1 ;;
+    esac
+}
+
+# ─── 运行前状态快照 ──────────────────────────────────────────────────────
+declare -A BEFORE_STATE
+capture_before_state() {
+    BEFORE_STATE[bbr]=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "?")
+    BEFORE_STATE[somaxconn]=$(sysctl -n net.core.somaxconn 2>/dev/null || echo "?")
+    BEFORE_STATE[file_max]=$(sysctl -n fs.file-max 2>/dev/null || echo "?")
+    BEFORE_STATE[swappiness]=$(sysctl -n vm.swappiness 2>/dev/null || echo "?")
+    BEFORE_STATE[tcp_fastopen]=$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null || echo "?")
+    BEFORE_STATE[docker_count]=$(docker ps -q 2>/dev/null | wc -l || echo "0")
+    BEFORE_STATE[cpu]=$(nproc)
+    BEFORE_STATE[mem_total]=$(get_total_mem_mb)
+    BEFORE_STATE[mem_avail]=$(get_available_mem_mb)
+    BEFORE_STATE[disk]=$(df -h / | awk 'NR==2{print $5}')
 }
 
 ###############################################################################
@@ -397,13 +431,20 @@ detect_containers() {
     # 打印容器详情
     for container in "$NGINX_CONTAINER" "$PHP_CONTAINER" "$MARIADB_CONTAINER" "$REDIS_CONTAINER"; do
         if [[ -n "$container" ]]; then
-            local ports mounts mem
+            local ports mem
             ports=$(docker port "$container" 2>/dev/null | tr '\n' ', ' || echo "N/A")
-            mounts=$(docker inspect "$container" --format '{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}' 2>/dev/null || echo "N/A")
             mem=$(docker stats "$container" --no-stream --format '{{.MemUsage}}' 2>/dev/null || echo "N/A")
             log "INFO" "  $container — 端口: ${ports:-N/A} | 内存: ${mem:-N/A}"
         fi
     done
+}
+
+# ─── 通用: 通过 Docker inspect 获取容器挂载到宿主机的路径 ────────────────────
+# 用法: detect_host_mount <container_name> <container_path>
+#   返回对应的宿主机路径，找不到返回空
+detect_host_mount() {
+    local ctr=$1 cpath=$2
+    docker inspect "$ctr" --format "{{range .Mounts}}{{if eq .Destination \"$cpath\"}}{{.Source}}{{end}}{{end}}" 2>/dev/null || true
 }
 
 ###############################################################################
@@ -988,15 +1029,26 @@ HEADER
 
     # Nginx/OpenResty
     if [[ -n "$NGINX_CONTAINER" ]]; then
-        # 检测 1Panel 管理的 OpenResty 配置路径
+        # 通过 Docker inspect 自动检测宿主机挂载路径 (兼容 1Panel / 宝塔 / 自定义)
         local nginx_host_conf=""
-        local nginx_host_log=""
         local nginx_host_confd=""
-        if [[ -f /opt/1panel/apps/openresty/openresty/conf/nginx.conf ]]; then
-            nginx_host_conf="/opt/1panel/apps/openresty/openresty/conf/nginx.conf"
-            nginx_host_log="/opt/1panel/apps/openresty/openresty/log"
-            nginx_host_confd="/opt/1panel/www/conf.d"
-            log "INFO" "检测到 1Panel 管理的 OpenResty，使用宿主机挂载路径"
+        # 尝试常见 Nginx 配置容器路径的宿主机映射
+        local _nc
+        _nc=$(detect_host_mount "$NGINX_CONTAINER" "/usr/local/openresty/nginx/conf")
+        [[ -z "$_nc" ]] && _nc=$(detect_host_mount "$NGINX_CONTAINER" "/etc/nginx")
+        if [[ -n "$_nc" && -f "$_nc/nginx.conf" ]]; then
+            nginx_host_conf="$_nc/nginx.conf"
+            log "INFO" "通过 Docker mount 检测到 Nginx 配置: $_nc"
+        fi
+        # 检测 conf.d 宿主机目录 (1Panel 的 conf.d 可能在不同路径)
+        local _ncd
+        _ncd=$(detect_host_mount "$NGINX_CONTAINER" "/usr/local/openresty/nginx/conf/conf.d")
+        [[ -z "$_ncd" ]] && _ncd=$(detect_host_mount "$NGINX_CONTAINER" "/etc/nginx/conf.d")
+        # 1Panel 特殊: www/conf.d 挂载到 /www
+        [[ -z "$_ncd" ]] && _ncd=$(detect_host_mount "$NGINX_CONTAINER" "/www")
+        if [[ -n "$_ncd" ]]; then
+            nginx_host_confd="$_ncd"
+            log "INFO" "检测到 conf.d 目录: $_ncd"
         fi
 
         cat >> "$APPLY_SCRIPT" << EOF
@@ -1039,13 +1091,14 @@ EOF
 
     # PHP-FPM
     if [[ -n "$PHP_CONTAINER" ]]; then
-        # 检测 1Panel 管理的 PHP-FPM 配置路径
+        # 通过 Docker inspect 自动检测宿主机挂载路径
         local php_host_confd=""
-        local php_host_fpm_conf=""
-        if [[ -d /opt/1panel/runtime/php/PHP/conf/conf.d ]]; then
-            php_host_confd="/opt/1panel/runtime/php/PHP/conf/conf.d"
-            php_host_fpm_conf="/opt/1panel/runtime/php/PHP/conf/php-fpm.conf"
-            log "INFO" "检测到 1Panel 管理的 PHP-FPM，使用宿主机挂载路径"
+        local _pc
+        _pc=$(detect_host_mount "$PHP_CONTAINER" "/usr/local/etc/php/conf.d")
+        [[ -z "$_pc" ]] && _pc=$(detect_host_mount "$PHP_CONTAINER" "/etc/php/conf.d")
+        if [[ -n "$_pc" && -d "$_pc" ]]; then
+            php_host_confd="$_pc"
+            log "INFO" "通过 Docker mount 检测到 PHP conf.d: $_pc"
         fi
 
         # 检测 PHP www.conf 在容器内的实际路径
@@ -1062,7 +1115,7 @@ EOF
         if [[ -n "$php_host_confd" ]]; then
             cat >> "$APPLY_SCRIPT" << EOF
 
-# 1Panel 管理的 PHP-FPM: 通过宿主机挂载目录复制配置
+# 通过宿主机挂载目录复制 PHP 配置
 cp -a "$php_host_confd" "\$BACKUP_DIR/php-conf.d.bak" 2>/dev/null || true
 cp "\$OUTPUT_DIR/php/opcache.ini" "$php_host_confd/99-opcache.ini"
 cp "\$OUTPUT_DIR/php/security.ini" "$php_host_confd/99-security.ini"
@@ -1091,11 +1144,25 @@ EOF
 
     # MariaDB/MySQL
     if [[ -n "$MARIADB_CONTAINER" ]]; then
-        # 检测 1Panel 管理的 MariaDB 配置路径
+        # 通过 Docker inspect 自动检测宿主机挂载路径
         local mariadb_host_conf=""
-        if [[ -f /opt/1panel/apps/mariadb/mariadb/conf/my.cnf ]]; then
-            mariadb_host_conf="/opt/1panel/apps/mariadb/mariadb/conf/my.cnf"
-            log "INFO" "检测到 1Panel 管理的 MariaDB，使用宿主机配置路径"
+        local _mc
+        _mc=$(detect_host_mount "$MARIADB_CONTAINER" "/etc/mysql/conf.d")
+        [[ -z "$_mc" ]] && _mc=$(detect_host_mount "$MARIADB_CONTAINER" "/etc/mysql/mariadb.conf.d")
+        [[ -z "$_mc" ]] && _mc=$(detect_host_mount "$MARIADB_CONTAINER" "/etc/my.cnf.d")
+        # 检测整个 /etc/mysql 挂载 (常见于 1Panel)
+        if [[ -z "$_mc" ]]; then
+            local _mroot
+            _mroot=$(detect_host_mount "$MARIADB_CONTAINER" "/etc/mysql")
+            if [[ -n "$_mroot" && -f "$_mroot/my.cnf" ]]; then
+                mariadb_host_conf="$_mroot/my.cnf"
+                mkdir -p "$_mroot/conf.d" 2>/dev/null
+                _mc="$_mroot/conf.d"
+            fi
+        fi
+        if [[ -n "$_mc" ]]; then
+            [[ -z "$mariadb_host_conf" ]] && mariadb_host_conf=$(find "$_mc/../" -maxdepth 1 -name "my.cnf" 2>/dev/null | head -1)
+            log "INFO" "通过 Docker mount 检测到 MariaDB 配置目录: $_mc"
         fi
 
         cat >> "$APPLY_SCRIPT" << EOF
@@ -1104,14 +1171,16 @@ EOF
 log "应用 MariaDB 配置到容器: $MARIADB_CONTAINER"
 EOF
         if [[ -n "$mariadb_host_conf" ]]; then
+            local _mc_confdir
+            _mc_confdir=$(dirname "$mariadb_host_conf")/conf.d
             cat >> "$APPLY_SCRIPT" << EOF
 
-# 1Panel 管理的 MariaDB: 将优化配置追加到宿主机 my.cnf
+# 宿主机挂载的 MariaDB: 将优化配置以 conf.d 方式引入
 cp -a "$mariadb_host_conf" "\$BACKUP_DIR/mariadb-my.cnf.bak" 2>/dev/null || true
 
-# 将生成的优化配置以 !includedir 方式引入
-mkdir -p /opt/1panel/apps/mariadb/mariadb/conf/conf.d
-cp "\$OUTPUT_DIR/mariadb/custom.cnf" "/opt/1panel/apps/mariadb/mariadb/conf/conf.d/zz-optimize.cnf"
+# 创建 conf.d 并放入优化配置
+mkdir -p "$_mc_confdir"
+cp "\$OUTPUT_DIR/mariadb/custom.cnf" "$_mc_confdir/zz-optimize.cnf"
 
 # 检查 my.cnf 是否已包含 includedir
 if ! grep -q 'includedir.*conf.d' "$mariadb_host_conf" 2>/dev/null; then
@@ -1141,6 +1210,10 @@ EOF
 
     # Redis
     if [[ -n "$REDIS_CONTAINER" ]]; then
+        # 从生成的配置中读取实际的 maxmemory 值
+        local redis_actual_mem
+        redis_actual_mem=$(awk '/^maxmemory /{print $2}' "$OUTPUT_DIR/redis/custom.conf" 2>/dev/null || echo "256mb")
+
         cat >> "$APPLY_SCRIPT" << EOF
 
 # ═══ Redis: $REDIS_CONTAINER ═══
@@ -1151,14 +1224,14 @@ backup_from_container "$REDIS_CONTAINER" "/usr/local/etc/redis/redis.conf" "redi
 backup_from_container "$REDIS_CONTAINER" "/etc/redis/redis.conf" "redis.conf" 2>/dev/null || true
 
 # 尝试通过 CONFIG SET 在线应用（不需要重启）
-docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET maxmemory "${REDIS_MAXMEMORY:-256mb}" 2>/dev/null || true
+docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET maxmemory "${redis_actual_mem}" 2>/dev/null || true
 docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET maxmemory-policy "${REDIS_POLICY}" 2>/dev/null || true
 docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET maxclients ${REDIS_MAXCLIENTS} 2>/dev/null || true
 docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET tcp-keepalive 300 2>/dev/null || true
 docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET slowlog-log-slower-than 10000 2>/dev/null || true
 docker exec "$REDIS_CONTAINER" redis-cli CONFIG REWRITE 2>/dev/null || true
 
-log "Redis 配置已在线应用"
+log "Redis 配置已在线应用 (maxmemory=${redis_actual_mem})"
 EOF
     fi
 
@@ -1576,6 +1649,98 @@ interactive_menu() {
 }
 
 ###############################################################################
+#  运行后成果总结
+###############################################################################
+show_final_summary() {
+    local rate=0
+    [[ $TOTAL_COUNT -gt 0 ]] && rate=$((PASS_COUNT * 100 / TOTAL_COUNT))
+
+    echo "" | tee -a "$LOG_FILE"
+    printf "${BOLD}${GREEN}╔═══════════════════════════════════════════════════════════════╗${NC}\n" | tee -a "$LOG_FILE"
+    printf "${BOLD}${GREEN}║                 性能优化完成                                 ║${NC}\n" | tee -a "$LOG_FILE"
+    printf "${BOLD}${GREEN}╚═══════════════════════════════════════════════════════════════╝${NC}\n" | tee -a "$LOG_FILE"
+
+    # ── 前后对比表 ──
+    echo "" | tee -a "$LOG_FILE"
+    printf "${BOLD}${CYAN}┌─────────────────────┬──────────────────┬──────────────────┐${NC}\n" | tee -a "$LOG_FILE"
+    printf "${BOLD}${CYAN}│ %-19s │ %-16s │ %-16s │${NC}\n" "项目" "优化前" "优化后" | tee -a "$LOG_FILE"
+    printf "${BOLD}${CYAN}├─────────────────────┼──────────────────┼──────────────────┤${NC}\n" | tee -a "$LOG_FILE"
+
+    _row() { printf "${CYAN}│${NC} %-19s ${CYAN}│${NC} %-16s ${CYAN}│${NC} ${GREEN}%-16s${NC} ${CYAN}│${NC}\n" "$1" "$2" "$3" | tee -a "$LOG_FILE"; }
+
+    _row "TCP 拥塞控制"    "${BEFORE_STATE[bbr]:-?}"       "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '?')"
+    _row "somaxconn"       "${BEFORE_STATE[somaxconn]:-?}" "$(sysctl -n net.core.somaxconn 2>/dev/null || echo '?')"
+    _row "file-max"        "${BEFORE_STATE[file_max]:-?}"  "$(sysctl -n fs.file-max 2>/dev/null || echo '?')"
+    _row "swappiness"      "${BEFORE_STATE[swappiness]:-?}" "$(sysctl -n vm.swappiness 2>/dev/null || echo '?')"
+    _row "TCP Fast Open"   "${BEFORE_STATE[tcp_fastopen]:-?}" "$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null || echo '?')"
+
+    printf "${BOLD}${CYAN}└─────────────────────┴──────────────────┴──────────────────┘${NC}\n" | tee -a "$LOG_FILE"
+
+    # ── 验证通过率 ──
+    echo "" | tee -a "$LOG_FILE"
+    printf "  ${BOLD}验证通过率: ${GREEN}%d/%d (%d%%)${NC}\n" "$PASS_COUNT" "$TOTAL_COUNT" "$rate" | tee -a "$LOG_FILE"
+
+    # ── 你得到了什么 ──
+    echo "" | tee -a "$LOG_FILE"
+    printf "${BOLD}${CYAN}═══ 本次优化为你带来 ═══${NC}\n" | tee -a "$LOG_FILE"
+    printf "  ${GREEN}✓${NC} 内核调优: BBR 拥塞控制, TCP Fast Open, 高性能缓冲区\n" | tee -a "$LOG_FILE"
+    printf "  ${GREEN}✓${NC} 资源限制: file-max=%s, nofile=%s, swappiness=%s\n" "$SYSCTL_FILE_MAX" "$ULIMIT_NOFILE" "$SWAPPINESS" | tee -a "$LOG_FILE"
+
+    if [[ -n "$NGINX_CONTAINER" ]]; then
+        printf "  ${GREEN}✓${NC} Nginx 优化: workers=auto, connections=%s, gzip, fastcgi_cache, 安全头\n" "$NGINX_WORKER_CONNECTIONS" | tee -a "$LOG_FILE"
+    fi
+    if [[ -n "$PHP_CONTAINER" ]]; then
+        local mc; mc=$(awk -F'=' '/pm.max_children/{print $2}' "$OUTPUT_DIR/php/www.conf" 2>/dev/null | xargs)
+        printf "  ${GREEN}✓${NC} PHP-FPM 优化: max_children=%s, OPcache+JIT, 安全加固\n" "${mc:-auto}" | tee -a "$LOG_FILE"
+    fi
+    if [[ -n "$MARIADB_CONTAINER" ]]; then
+        local bp; bp=$(awk -F'=' '/innodb_buffer_pool_size/{print $2}' "$OUTPUT_DIR/mariadb/custom.cnf" 2>/dev/null | xargs)
+        printf "  ${GREEN}✓${NC} MariaDB 优化: buffer_pool=%s, 慢查询日志, 连接管理\n" "${bp:-auto}" | tee -a "$LOG_FILE"
+    fi
+    if [[ -n "$REDIS_CONTAINER" ]]; then
+        local rm; rm=$(awk '/^maxmemory /{print $2}' "$OUTPUT_DIR/redis/custom.conf" 2>/dev/null)
+        printf "  ${GREEN}✓${NC} Redis 优化: maxmemory=%s, policy=%s, lazyfree\n" "${rm:-auto}" "$REDIS_POLICY" | tee -a "$LOG_FILE"
+    fi
+
+    printf "  ${GREEN}✓${NC} 运维自动化: 健康检查(5分钟), 定期清理(每周), OOM防护(每天)\n" | tee -a "$LOG_FILE"
+
+    # ── 检测到的容器 ──
+    if [[ -n "$NGINX_CONTAINER$PHP_CONTAINER$MARIADB_CONTAINER$REDIS_CONTAINER" ]]; then
+        echo "" | tee -a "$LOG_FILE"
+        printf "${BOLD}${CYAN}═══ 检测到的 Docker 容器 ═══${NC}\n" | tee -a "$LOG_FILE"
+        [[ -n "$NGINX_CONTAINER" ]]  && printf "  ${GREEN}●${NC} Nginx/OpenResty: %s\n" "$NGINX_CONTAINER" | tee -a "$LOG_FILE"
+        [[ -n "$PHP_CONTAINER" ]]    && printf "  ${GREEN}●${NC} PHP-FPM:         %s\n" "$PHP_CONTAINER" | tee -a "$LOG_FILE"
+        [[ -n "$MARIADB_CONTAINER" ]] && printf "  ${GREEN}●${NC} MariaDB/MySQL:   %s\n" "$MARIADB_CONTAINER" | tee -a "$LOG_FILE"
+        [[ -n "$REDIS_CONTAINER" ]]  && printf "  ${GREEN}●${NC} Redis:           %s\n" "$REDIS_CONTAINER" | tee -a "$LOG_FILE"
+    fi
+
+    # ── 生成的文件 ──
+    echo "" | tee -a "$LOG_FILE"
+    printf "${BOLD}${CYAN}═══ 生成的文件 ═══${NC}\n" | tee -a "$LOG_FILE"
+    printf "  配置目录:    %s\n" "$OUTPUT_DIR" | tee -a "$LOG_FILE"
+    printf "  应用脚本:    %s\n" "$APPLY_SCRIPT" | tee -a "$LOG_FILE"
+    printf "  日志文件:    %s\n" "$LOG_FILE" | tee -a "$LOG_FILE"
+    printf "  诊断报告:    %s\n" "$DIAG_FILE" | tee -a "$LOG_FILE"
+    printf "  回滚脚本:    %s\n" "$ROLLBACK_SCRIPT" | tee -a "$LOG_FILE"
+
+    # ── 下一步操作 ──
+    echo "" | tee -a "$LOG_FILE"
+    printf "${YELLOW}下一步操作:${NC}\n" | tee -a "$LOG_FILE"
+    if [[ -n "$NGINX_CONTAINER$PHP_CONTAINER$MARIADB_CONTAINER$REDIS_CONTAINER" ]]; then
+        if [[ "${AUTO_APPLY:-no}" == "yes" ]]; then
+            printf "  ${GREEN}✓${NC} Docker 配置已自动应用\n" | tee -a "$LOG_FILE"
+        else
+            printf "  1. 审查配置: ${BOLD}ls -la %s/*/${NC}\n" "$OUTPUT_DIR" | tee -a "$LOG_FILE"
+            printf "  2. 应用配置: ${BOLD}sudo bash %s${NC}\n" "$APPLY_SCRIPT" | tee -a "$LOG_FILE"
+        fi
+    else
+        printf "  未检测到 Docker 容器，配置模板已生成到 %s\n" "$OUTPUT_DIR" | tee -a "$LOG_FILE"
+        printf "  部署容器后运行: ${BOLD}sudo bash %s${NC}\n" "$APPLY_SCRIPT" | tee -a "$LOG_FILE"
+    fi
+    printf "  如需回滚: ${BOLD}sudo bash %s${NC}\n" "$ROLLBACK_SCRIPT" | tee -a "$LOG_FILE"
+}
+
+###############################################################################
 #  主流程
 ###############################################################################
 main() {
@@ -1586,17 +1751,20 @@ main() {
         case "$arg" in
             --auto) AUTO_MODE="yes" ;;
             --dry-run) DRY_RUN="yes" ;;
+            --force) FORCE_MODE="yes" ;;
             --help|-h)
                 echo "用法:"
-                echo "  sudo bash $0            # 交互模式"
-                echo "  sudo bash $0 --auto     # 自动全量"
-                echo "  sudo bash $0 --dry-run  # 仅生成配置不应用"
+                echo "  sudo bash $0                  # 交互模式"
+                echo "  sudo bash $0 --auto           # 自动执行（危险操作仍需确认）"
+                echo "  sudo bash $0 --auto --force   # 全自动无交互"
+                echo "  sudo bash $0 --dry-run        # 仅生成配置不应用"
                 exit 0
                 ;;
         esac
     done
 
     init_dirs
+    capture_before_state
 
     printf "${BOLD}${GREEN}"
     printf "╔═══════════════════════════════════════════════════════════════╗\n"
@@ -1644,9 +1812,13 @@ main() {
 
     # 如果交互模式选了自动应用，且不是 dry-run
     if [[ "${AUTO_APPLY:-no}" == "yes" && "$DRY_RUN" != "yes" ]]; then
-        echo "" | tee -a "$LOG_FILE"
-        log "INFO" "正在自动应用 Docker 配置..."
-        bash "$APPLY_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
+        if [[ -n "$NGINX_CONTAINER$PHP_CONTAINER$MARIADB_CONTAINER$REDIS_CONTAINER" ]]; then
+            if confirm_dangerous "即将应用配置到 Docker 容器并重启相关服务"; then
+                echo "" | tee -a "$LOG_FILE"
+                log "INFO" "正在应用 Docker 配置..."
+                bash "$APPLY_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
+            fi
+        fi
     fi
 
     # 首次执行 OOM 防护
@@ -1660,25 +1832,8 @@ main() {
     # 报告
     generate_report
 
-    echo "" | tee -a "$LOG_FILE"
-    printf "${BOLD}${GREEN}╔═══════════════════════════════════════════════════════════════╗${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${GREEN}║                 性能优化完成                                 ║${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${GREEN}╚═══════════════════════════════════════════════════════════════╝${NC}\n" | tee -a "$LOG_FILE"
-    echo "" | tee -a "$LOG_FILE"
-    log "INFO" "配置输出目录: $OUTPUT_DIR"
-    log "INFO" "日志文件: $LOG_FILE"
-    log "INFO" "诊断报告: $DIAG_FILE"
-    log "INFO" "回滚脚本: $ROLLBACK_SCRIPT"
-    echo "" | tee -a "$LOG_FILE"
-
-    if [[ -n "$NGINX_CONTAINER$PHP_CONTAINER$MARIADB_CONTAINER$REDIS_CONTAINER" ]]; then
-        printf "${YELLOW}Docker 容器配置应用:${NC}\n" | tee -a "$LOG_FILE"
-        printf "  审查配置: ${BOLD}ls -la $OUTPUT_DIR/*/${NC}\n" | tee -a "$LOG_FILE"
-        printf "  应用配置: ${BOLD}sudo bash $APPLY_SCRIPT${NC}\n" | tee -a "$LOG_FILE"
-    else
-        printf "${YELLOW}未检测到 Docker 容器。配置模板已生成到 $OUTPUT_DIR${NC}\n" | tee -a "$LOG_FILE"
-        printf "  部署容器后可手动应用配置\n" | tee -a "$LOG_FILE"
-    fi
+    # 显示成果总结
+    show_final_summary
 }
 
 main "$@"

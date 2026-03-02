@@ -3,8 +3,9 @@
 #  sec-harden.sh — Ubuntu 服务器安全加固脚本
 #  适用系统: Ubuntu 22.04 / 24.04 LTS
 #  用法:
-#    sudo bash sec-harden.sh            # 交互模式（菜单选择）
-#    sudo bash sec-harden.sh --auto     # 自动全量执行
+#    sudo bash sec-harden.sh                  # 交互模式（菜单选择）
+#    sudo bash sec-harden.sh --auto           # 自动执行（危险操作仍需确认）
+#    sudo bash sec-harden.sh --auto --force   # 全自动无交互
 #    SSH_MODE=dev sudo bash sec-harden.sh --auto  # 开发模式
 ###############################################################################
 set -Euo pipefail
@@ -34,6 +35,7 @@ RESTRICT_IP="${RESTRICT_IP:-}"             # 限制来源 IP，逗号分隔
 INSTALL_AIDE="${INSTALL_AIDE:-yes}"        # yes | no
 INSTALL_RKHUNTER="${INSTALL_RKHUNTER:-yes}" # yes | no
 AUTO_MODE="${AUTO_MODE:-no}"
+FORCE_MODE="${FORCE_MODE:-no}"           # --force 跳过所有交互确认
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BACKUP_DIR="/root/.sec-harden-backup/${TIMESTAMP}"
@@ -80,6 +82,40 @@ check_result() {
         FAIL_COUNT=$((FAIL_COUNT + 1))
         printf "  ${RED}✗${NC} %s\n" "$desc" | tee -a "$LOG_FILE"
     fi
+}
+
+# ─── 危险操作确认（即使 --auto 也会询问，--force 跳过）────────────────────────
+confirm_dangerous() {
+    local msg=$1
+    if [[ "$FORCE_MODE" == "yes" ]]; then
+        log "INFO" "[FORCE] 跳过确认: $msg"
+        return 0
+    fi
+    echo "" | tee -a "$LOG_FILE"
+    printf "  ${YELLOW}⚠ 危险操作: %s${NC}\n" "$msg" | tee -a "$LOG_FILE"
+    printf "  ${BOLD}确认继续? [y/N]: ${NC}"
+    read -r answer </dev/tty 2>/dev/null || answer="y"
+    case "$answer" in
+        [yY]*) return 0 ;;
+        *) log "WARN" "用户取消: $msg"; return 1 ;;
+    esac
+}
+
+# ─── 运行前状态快照 ──────────────────────────────────────────────────────────
+declare -A BEFORE_STATE
+capture_before_state() {
+    BEFORE_STATE[ssh_port]=$(grep -E '^Port ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "22")
+    [[ -z "${BEFORE_STATE[ssh_port]}" ]] && BEFORE_STATE[ssh_port]="22"
+    BEFORE_STATE[ssh_pwd_auth]=$(grep -E '^PasswordAuthentication ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "unknown")
+    BEFORE_STATE[ssh_root_login]=$(grep -E '^PermitRootLogin ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "unknown")
+    BEFORE_STATE[ufw_status]=$(ufw status 2>/dev/null | head -1 || echo "未安装")
+    BEFORE_STATE[fail2ban]=$(systemctl is-active fail2ban 2>/dev/null || echo "未安装")
+    BEFORE_STATE[syncookies]=$(sysctl -n net.ipv4.tcp_syncookies 2>/dev/null || echo "?")
+    BEFORE_STATE[aslr]=$(sysctl -n kernel.randomize_va_space 2>/dev/null || echo "?")
+    BEFORE_STATE[core_dump]=$(sysctl -n fs.suid_dumpable 2>/dev/null || echo "?")
+    BEFORE_STATE[auditd]=$(systemctl is-active auditd 2>/dev/null || echo "未运行")
+    BEFORE_STATE[auto_update]=$(systemctl is-enabled unattended-upgrades 2>/dev/null || echo "未启用")
+    BEFORE_STATE[docker_count]=$(docker ps -q 2>/dev/null | wc -l || echo "0")
 }
 
 # ─── 前置检查 ────────────────────────────────────────────────────────────────
@@ -171,6 +207,18 @@ detect_1panel_ports() {
 harden_ssh() {
     step_banner 1 "SSH 加固"
     local sshd_conf="/etc/ssh/sshd_config"
+
+    # 危险操作确认: SSH 端口更改
+    local cur_port
+    cur_port=$(grep -E '^Port ' "$sshd_conf" 2>/dev/null | awk '{print $2}' || echo "22")
+    [[ -z "$cur_port" ]] && cur_port="22"
+    if [[ "$cur_port" != "$SSH_PORT" ]]; then
+        if ! confirm_dangerous "SSH 端口将从 $cur_port 更改为 $SSH_PORT (请确保云安全组/防火墙已放行新端口)"; then
+            log "WARN" "跳过 SSH 端口更改"
+            SSH_PORT="$cur_port"  # 保持原端口
+        fi
+    fi
+
     backup_file "$sshd_conf"
 
     # 备份 sshd_config.d 下的文件
@@ -381,6 +429,10 @@ DOCKERUFW
     fi
 
     # 启用 UFW
+    if ! confirm_dangerous "即将启用 UFW 防火墙 (已放行端口: SSH=$SSH_PORT${ALLOW_HTTP:+, 80, 443}${panel_ports:+, 1Panel=$panel_ports})"; then
+        log "WARN" "用户取消 UFW 启用"
+        return
+    fi
     echo "y" | ufw enable >/dev/null 2>&1
     log "INFO" "UFW 防火墙已启用"
 
@@ -397,6 +449,38 @@ setup_fail2ban() {
     apt-get install -y fail2ban >/dev/null 2>&1 || true
 
     backup_file "/etc/fail2ban/jail.local"
+
+    # 自动检测 Nginx/OpenResty 日志路径 (兼容 1Panel / 宝塔 / 原生安装)
+    local nginx_error_log="" nginx_access_log=""
+    local search_paths=(
+        "/opt/1panel/apps/openresty/openresty/log"
+        "/opt/1panel/apps/nginx/nginx/log"
+        "/www/server/nginx/logs"
+        "/var/log/nginx"
+    )
+    for p in "${search_paths[@]}"; do
+        if [[ -f "$p/error.log" ]]; then
+            nginx_error_log="$p/error.log"
+            nginx_access_log="$p/access.log"
+            log "INFO" "检测到 Nginx 日志路径: $p"
+            break
+        fi
+    done
+    # Docker 容器挂载检测
+    if [[ -z "$nginx_error_log" ]] && command -v docker &>/dev/null; then
+        local nginx_ctr
+        nginx_ctr=$(docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null | awk -F'\t' 'tolower($2)~/openresty|nginx/{print $1; exit}')
+        if [[ -n "$nginx_ctr" ]]; then
+            local mnt
+            mnt=$(docker inspect "$nginx_ctr" --format '{{range .Mounts}}{{if eq .Destination "/usr/local/openresty/nginx/logs"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)
+            [[ -z "$mnt" ]] && mnt=$(docker inspect "$nginx_ctr" --format '{{range .Mounts}}{{if eq .Destination "/var/log/nginx"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)
+            if [[ -n "$mnt" && -f "$mnt/error.log" ]]; then
+                nginx_error_log="$mnt/error.log"
+                nginx_access_log="$mnt/access.log"
+                log "INFO" "通过 Docker 挂载检测到 Nginx 日志: $mnt"
+            fi
+        fi
+    fi
 
     cat > /etc/fail2ban/jail.local << EOF
 # === sec-harden.sh Fail2ban 配置 ===
@@ -423,27 +507,34 @@ logpath  = /var/log/fail2ban.log
 bantime  = 604800
 findtime = 86400
 maxretry = 3
+EOF
+
+    # 仅在检测到 Nginx 日志时添加 Nginx jail
+    if [[ -n "$nginx_error_log" ]]; then
+        cat >> /etc/fail2ban/jail.local << EOF
 
 [nginx-limit-req]
 enabled  = false
 port     = http,https
 filter   = nginx-limit-req
-logpath  = /opt/1panel/apps/openresty/openresty/log/error.log
+logpath  = ${nginx_error_log}
 maxretry = 5
 bantime  = 3600
 findtime = 120
-# 注意: Nginx 在 Docker 容器内运行，日志路径取决于 1Panel 挂载点
-# 如果日志路径不存在，Fail2ban 将自动忽略此 jail
 
 [nginx-botsearch]
 enabled  = false
 port     = http,https
 filter   = nginx-botsearch
-logpath  = /opt/1panel/apps/openresty/openresty/log/access.log
+logpath  = ${nginx_access_log}
 maxretry = 3
 bantime  = 86400
 findtime = 60
 EOF
+        log "INFO" "Fail2ban: 已添加 Nginx jail (日志: $nginx_error_log)"
+    else
+        log "INFO" "Fail2ban: 未检测到 Nginx 日志路径，跳过 Nginx jail"
+    fi
 
     systemctl enable fail2ban >/dev/null 2>&1
     systemctl restart fail2ban >/dev/null 2>&1
@@ -1397,6 +1488,88 @@ interactive_menu() {
 }
 
 ###############################################################################
+#  运行后成果总结
+###############################################################################
+show_final_summary() {
+    local rate=0
+    [[ $TOTAL_COUNT -gt 0 ]] && rate=$((PASS_COUNT * 100 / TOTAL_COUNT))
+
+    echo "" | tee -a "$LOG_FILE"
+    printf "${BOLD}${GREEN}╔═══════════════════════════════════════════════════════════════╗${NC}\n" | tee -a "$LOG_FILE"
+    printf "${BOLD}${GREEN}║                   安全加固完成                               ║${NC}\n" | tee -a "$LOG_FILE"
+    printf "${BOLD}${GREEN}╚═══════════════════════════════════════════════════════════════╝${NC}\n" | tee -a "$LOG_FILE"
+
+    # ── 前后对比表 ──
+    echo "" | tee -a "$LOG_FILE"
+    printf "${BOLD}${CYAN}┌─────────────────────┬──────────────────┬──────────────────┐${NC}\n" | tee -a "$LOG_FILE"
+    printf "${BOLD}${CYAN}│ %-19s │ %-16s │ %-16s │${NC}\n" "项目" "加固前" "加固后" | tee -a "$LOG_FILE"
+    printf "${BOLD}${CYAN}├─────────────────────┼──────────────────┼──────────────────┤${NC}\n" | tee -a "$LOG_FILE"
+
+    local after_port after_pwd after_root after_ufw after_f2b after_sync after_aslr after_core after_audit
+    after_port=$(grep -E '^Port ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "?")
+    after_pwd=$(grep -E '^PasswordAuthentication ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "?")
+    after_root=$(grep -E '^PermitRootLogin ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "?")
+    after_ufw=$(ufw status 2>/dev/null | head -1 || echo "?")
+    after_f2b=$(systemctl is-active fail2ban 2>/dev/null || echo "?")
+    after_sync=$(sysctl -n net.ipv4.tcp_syncookies 2>/dev/null || echo "?")
+    after_aslr=$(sysctl -n kernel.randomize_va_space 2>/dev/null || echo "?")
+    after_core=$(sysctl -n fs.suid_dumpable 2>/dev/null || echo "?")
+    after_audit=$(systemctl is-active auditd 2>/dev/null || echo "?")
+
+    _row() { printf "${CYAN}│${NC} %-19s ${CYAN}│${NC} %-16s ${CYAN}│${NC} ${GREEN}%-16s${NC} ${CYAN}│${NC}\n" "$1" "$2" "$3" | tee -a "$LOG_FILE"; }
+    _row "SSH 端口"        "${BEFORE_STATE[ssh_port]:-?}"     "$after_port"
+    _row "密码登录"        "${BEFORE_STATE[ssh_pwd_auth]:-?}" "$after_pwd"
+    _row "Root 登录"       "${BEFORE_STATE[ssh_root_login]:-?}" "$after_root"
+    _row "防火墙 UFW"      "${BEFORE_STATE[ufw_status]:-?}"   "$after_ufw"
+    _row "Fail2ban"        "${BEFORE_STATE[fail2ban]:-?}"      "$after_f2b"
+    _row "SYN Cookies"     "${BEFORE_STATE[syncookies]:-?}"    "$after_sync"
+    _row "ASLR"            "${BEFORE_STATE[aslr]:-?}"          "$after_aslr"
+    _row "核心转储"        "${BEFORE_STATE[core_dump]:-?}"     "$after_core"
+    _row "审计 auditd"     "${BEFORE_STATE[auditd]:-?}"       "$after_audit"
+
+    printf "${BOLD}${CYAN}└─────────────────────┴──────────────────┴──────────────────┘${NC}\n" | tee -a "$LOG_FILE"
+
+    # ── 验证通过率 ──
+    echo "" | tee -a "$LOG_FILE"
+    printf "  ${BOLD}验证通过率: ${GREEN}%d/%d (%d%%)${NC}\n" "$PASS_COUNT" "$TOTAL_COUNT" "$rate" | tee -a "$LOG_FILE"
+
+    # ── 你得到了什么 ──
+    echo "" | tee -a "$LOG_FILE"
+    printf "${BOLD}${CYAN}═══ 本次加固为你带来 ═══${NC}\n" | tee -a "$LOG_FILE"
+    printf "  ${GREEN}✓${NC} SSH 强化: 端口 %s, Ed25519 优先, 限制登录尝试\n" "$after_port" | tee -a "$LOG_FILE"
+    printf "  ${GREEN}✓${NC} 防火墙: UFW 仅放行必要端口, Docker 兼容\n" | tee -a "$LOG_FILE"
+    printf "  ${GREEN}✓${NC} 暴力防护: Fail2ban %s次重试/%ss封禁\n" "$FAIL2BAN_MAXRETRY" "$FAIL2BAN_BANTIME" | tee -a "$LOG_FILE"
+    printf "  ${GREEN}✓${NC} 内核加固: SYN cookies, ASLR, ptrace 限制, 禁用危险模块\n" | tee -a "$LOG_FILE"
+    printf "  ${GREEN}✓${NC} 文件安全: SUID 清理, /etc/shadow 600, 关键目录加固\n" | tee -a "$LOG_FILE"
+    printf "  ${GREEN}✓${NC} 攻击面缩减: 禁用不必要服务, 核心转储, su/shell 限制\n" | tee -a "$LOG_FILE"
+    printf "  ${GREEN}✓${NC} 审计追踪: auditd 全面规则, 自动更新, 登录横幅\n" | tee -a "$LOG_FILE"
+    if [[ "$INSTALL_AIDE" == "yes" ]]; then
+        printf "  ${GREEN}✓${NC} 完整性检测: AIDE 每日检查\n" | tee -a "$LOG_FILE"
+    fi
+    if [[ "$INSTALL_RKHUNTER" == "yes" ]]; then
+        printf "  ${GREEN}✓${NC} Rootkit 扫描: rkhunter 每周扫描\n" | tee -a "$LOG_FILE"
+    fi
+
+    # ── 生成的文件 ──
+    echo "" | tee -a "$LOG_FILE"
+    printf "${BOLD}${CYAN}═══ 生成的文件 ═══${NC}\n" | tee -a "$LOG_FILE"
+    printf "  日志文件:    %s\n" "$LOG_FILE" | tee -a "$LOG_FILE"
+    printf "  诊断报告:    %s\n" "$DIAG_FILE" | tee -a "$LOG_FILE"
+    printf "  回滚脚本:    %s\n" "$ROLLBACK_SCRIPT" | tee -a "$LOG_FILE"
+    printf "  备份目录:    %s\n" "$BACKUP_DIR" | tee -a "$LOG_FILE"
+
+    # ── 重要提示 ──
+    echo "" | tee -a "$LOG_FILE"
+    printf "${YELLOW}⚠ 重要提示:${NC}\n" | tee -a "$LOG_FILE"
+    printf "  1. SSH 端口: ${BOLD}%s${NC} — 请确保新端口可连接后再断开当前会话\n" "$after_port" | tee -a "$LOG_FILE"
+    printf "  2. 新SSH连接: ${BOLD}ssh -p %s user@host${NC}\n" "$after_port" | tee -a "$LOG_FILE"
+    printf "  3. 如需回滚: ${BOLD}sudo bash %s${NC}\n" "$ROLLBACK_SCRIPT" | tee -a "$LOG_FILE"
+    if [[ "${BEFORE_STATE[docker_count]:-0}" -gt 0 ]]; then
+        printf "  4. Docker 容器 (%s个) 不受影响\n" "${BEFORE_STATE[docker_count]}" | tee -a "$LOG_FILE"
+    fi
+}
+
+###############################################################################
 #  主流程
 ###############################################################################
 main() {
@@ -1407,10 +1580,12 @@ main() {
     for arg in "$@"; do
         case "$arg" in
             --auto) AUTO_MODE="yes" ;;
+            --force) FORCE_MODE="yes" ;;
             --help|-h)
                 echo "用法:"
-                echo "  sudo bash $0            # 交互模式"
-                echo "  sudo bash $0 --auto     # 自动全量执行"
+                echo "  sudo bash $0                  # 交互模式"
+                echo "  sudo bash $0 --auto           # 自动执行（危险操作仍需确认）"
+                echo "  sudo bash $0 --auto --force   # 全自动无交互"
                 echo "  SSH_MODE=dev sudo bash $0 --auto  # 开发模式"
                 exit 0
                 ;;
@@ -1419,6 +1594,7 @@ main() {
 
     # 初始化
     init_backup
+    capture_before_state
 
     printf "${BOLD}${GREEN}"
     printf "╔═══════════════════════════════════════════════════════════════╗\n"
@@ -1474,19 +1650,8 @@ main() {
     # 生成报告
     generate_report
 
-    echo "" | tee -a "$LOG_FILE"
-    printf "${BOLD}${GREEN}╔═══════════════════════════════════════════════════════════════╗${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${GREEN}║                   安全加固完成                               ║${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${GREEN}╚═══════════════════════════════════════════════════════════════╝${NC}\n" | tee -a "$LOG_FILE"
-    echo "" | tee -a "$LOG_FILE"
-    log "INFO" "日志文件: $LOG_FILE"
-    log "INFO" "诊断报告: $DIAG_FILE"
-    log "INFO" "回滚脚本: $ROLLBACK_SCRIPT"
-    echo "" | tee -a "$LOG_FILE"
-    printf "${YELLOW}⚠ 重要提示:${NC}\n" | tee -a "$LOG_FILE"
-    printf "  1. SSH 端口已改为 ${BOLD}$SSH_PORT${NC}，请确保新端口可连接后再断开当前会话\n" | tee -a "$LOG_FILE"
-    printf "  2. 如需回滚: ${BOLD}sudo bash $ROLLBACK_SCRIPT${NC}\n" | tee -a "$LOG_FILE"
-    printf "  3. 新SSH连接: ${BOLD}ssh -p $SSH_PORT user@host${NC}\n" | tee -a "$LOG_FILE"
+    # 显示成果总结
+    show_final_summary
 }
 
 main "$@"
