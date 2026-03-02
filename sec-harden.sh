@@ -9,7 +9,7 @@
 #    SSH_MODE=dev sudo bash sec-harden.sh --auto  # 开发模式
 ###############################################################################
 set -Euo pipefail
-VERSION="3.1"
+SCRIPT_VERSION="3.2"
 
 # ─── ERR trap ────────────────────────────────────────────────────────────────
 trap '_err_handler $LINENO "$BASH_COMMAND"' ERR
@@ -95,7 +95,7 @@ confirm_dangerous() {
     echo "" | tee -a "$LOG_FILE"
     printf "  ${YELLOW}⚠ 危险操作: %s${NC}\n" "$msg" | tee -a "$LOG_FILE"
     printf "  ${BOLD}确认继续? [y/N]: ${NC}"
-    read -r answer </dev/tty 2>/dev/null || answer="y"
+    read -r answer </dev/tty 2>/dev/null || answer="n"
     case "$answer" in
         [yY]*) return 0 ;;
         *) log "WARN" "用户取消: $msg"; return 1 ;;
@@ -105,18 +105,29 @@ confirm_dangerous() {
 # ─── 运行前状态快照 ──────────────────────────────────────────────────────────
 declare -A BEFORE_STATE
 capture_before_state() {
-    BEFORE_STATE[ssh_port]=$(grep -E '^Port ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "22")
+    # 注意: 由于 set -o pipefail，管道命令失败时 || 会额外输出，
+    # 因此将 || 放在 $() 之外，避免双重输出
+    BEFORE_STATE[ssh_port]=$(grep -E '^Port ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}') || true
     [[ -z "${BEFORE_STATE[ssh_port]}" ]] && BEFORE_STATE[ssh_port]="22"
-    BEFORE_STATE[ssh_pwd_auth]=$(grep -E '^PasswordAuthentication ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "unknown")
-    BEFORE_STATE[ssh_root_login]=$(grep -E '^PermitRootLogin ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "unknown")
-    BEFORE_STATE[ufw_status]=$(ufw status 2>/dev/null | head -1 || echo "未安装")
-    BEFORE_STATE[fail2ban]=$(systemctl is-active fail2ban 2>/dev/null || echo "未安装")
-    BEFORE_STATE[syncookies]=$(sysctl -n net.ipv4.tcp_syncookies 2>/dev/null || echo "?")
-    BEFORE_STATE[aslr]=$(sysctl -n kernel.randomize_va_space 2>/dev/null || echo "?")
-    BEFORE_STATE[core_dump]=$(sysctl -n fs.suid_dumpable 2>/dev/null || echo "?")
-    BEFORE_STATE[auditd]=$(systemctl is-active auditd 2>/dev/null || echo "未运行")
-    BEFORE_STATE[auto_update]=$(systemctl is-enabled unattended-upgrades 2>/dev/null || echo "未启用")
-    BEFORE_STATE[docker_count]=$(docker ps -q 2>/dev/null | wc -l || echo "0")
+    BEFORE_STATE[ssh_pwd_auth]=$(grep -E '^PasswordAuthentication ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}') || true
+    [[ -z "${BEFORE_STATE[ssh_pwd_auth]}" ]] && BEFORE_STATE[ssh_pwd_auth]="unknown"
+    BEFORE_STATE[ssh_root_login]=$(grep -E '^PermitRootLogin ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}') || true
+    [[ -z "${BEFORE_STATE[ssh_root_login]}" ]] && BEFORE_STATE[ssh_root_login]="unknown"
+    BEFORE_STATE[ufw_status]=$(ufw status 2>/dev/null | head -1) || true
+    [[ -z "${BEFORE_STATE[ufw_status]}" ]] && BEFORE_STATE[ufw_status]="未安装"
+    BEFORE_STATE[fail2ban]=$(systemctl is-active fail2ban 2>/dev/null) || true
+    [[ -z "${BEFORE_STATE[fail2ban]}" || "${BEFORE_STATE[fail2ban]}" == "inactive" ]] && BEFORE_STATE[fail2ban]="未运行"
+    BEFORE_STATE[syncookies]=$(sysctl -n net.ipv4.tcp_syncookies 2>/dev/null) || true
+    [[ -z "${BEFORE_STATE[syncookies]}" ]] && BEFORE_STATE[syncookies]="?"
+    BEFORE_STATE[aslr]=$(sysctl -n kernel.randomize_va_space 2>/dev/null) || true
+    [[ -z "${BEFORE_STATE[aslr]}" ]] && BEFORE_STATE[aslr]="?"
+    BEFORE_STATE[core_dump]=$(sysctl -n fs.suid_dumpable 2>/dev/null) || true
+    [[ -z "${BEFORE_STATE[core_dump]}" ]] && BEFORE_STATE[core_dump]="?"
+    BEFORE_STATE[auditd]=$(systemctl is-active auditd 2>/dev/null) || true
+    [[ -z "${BEFORE_STATE[auditd]}" || "${BEFORE_STATE[auditd]}" == "inactive" ]] && BEFORE_STATE[auditd]="未运行"
+    BEFORE_STATE[auto_update]=$(systemctl is-enabled unattended-upgrades 2>/dev/null) || true
+    [[ -z "${BEFORE_STATE[auto_update]}" ]] && BEFORE_STATE[auto_update]="未启用"
+    BEFORE_STATE[docker_count]=$( { docker ps -q 2>/dev/null || true; } | wc -l )
 }
 
 # ─── 前置检查 ────────────────────────────────────────────────────────────────
@@ -246,7 +257,6 @@ harden_ssh() {
     local ssh_config=""
     ssh_config+="# === sec-harden.sh 安全加固配置 $(date +%F) ===\n"
     ssh_config+="Port ${SSH_PORT}\n"
-    ssh_config+="Protocol 2\n"
     ssh_config+="AddressFamily inet\n"
     ssh_config+="\n# 认证\n"
     ssh_config+="PermitRootLogin prohibit-password\n"
@@ -258,7 +268,6 @@ harden_ssh() {
 
     if [[ "$has_keys" == true ]]; then
         ssh_config+="PasswordAuthentication no\n"
-        ssh_config+="ChallengeResponseAuthentication no\n"
         ssh_config+="KbdInteractiveAuthentication no\n"
         log "INFO" "检测到密钥，禁用密码登录"
     else
@@ -1405,7 +1414,7 @@ generate_report() {
     cat > "$DIAG_FILE" << YAMLEOF
 ---
 # sec-harden.sh 诊断报告
-version: "$VERSION"
+version: "$SCRIPT_VERSION"
 generated_at: "$(date -Iseconds)"
 hostname: "$(hostname)"
 os: "$(. /etc/os-release && echo "$PRETTY_NAME")"
@@ -1658,7 +1667,7 @@ main() {
             --auto) AUTO_MODE="yes" ;;
             --force) FORCE_MODE="yes" ;;
             --help|-h)
-                echo "sec-harden.sh v$VERSION — Ubuntu 服务器安全加固脚本"
+                echo "sec-harden.sh v$SCRIPT_VERSION — Ubuntu 服务器安全加固脚本"
                 echo ""
                 echo "用法:"
                 echo "  sudo bash $0                  # 交互模式"
@@ -1676,7 +1685,7 @@ main() {
 
     printf "${BOLD}${GREEN}"
     printf "╔═══════════════════════════════════════════════════════════════╗\n"
-    printf "║       Ubuntu 服务器安全加固脚本 sec-harden.sh v$VERSION      ║\n"
+    printf "║       Ubuntu 服务器安全加固脚本 sec-harden.sh v$SCRIPT_VERSION      ║\n"
     printf "╚═══════════════════════════════════════════════════════════════╝\n"
     printf "${NC}\n"
 

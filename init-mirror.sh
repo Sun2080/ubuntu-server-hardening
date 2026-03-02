@@ -11,7 +11,7 @@
 #  建议在 sec-harden.sh 和 web-optimize.sh 之前运行（仅需执行一次）
 ###############################################################################
 set -Euo pipefail
-VERSION="1.0"
+SCRIPT_VERSION="1.0"
 
 # ─── ERR trap ────────────────────────────────────────────────────────────────
 trap '_err_handler $LINENO "$BASH_COMMAND"' ERR
@@ -271,7 +271,7 @@ write_deb822_source() {
     local target=$3
 
     cat > "$target" << EOF
-## 由 init-mirror.sh v${VERSION} 生成 — ${TIMESTAMP}
+## 由 init-mirror.sh v${SCRIPT_VERSION} 生成 — ${TIMESTAMP}
 ## 镜像源: ${mirror_url}
 ## 回滚: sudo bash ${BACKUP_DIR}/rollback.sh
 
@@ -297,7 +297,7 @@ write_traditional_source() {
     local target=$3
 
     cat > "$target" << EOF
-## 由 init-mirror.sh v${VERSION} 生成 — ${TIMESTAMP}
+## 由 init-mirror.sh v${SCRIPT_VERSION} 生成 — ${TIMESTAMP}
 ## 镜像源: ${mirror_url}
 ## 回滚: sudo bash ${BACKUP_DIR}/rollback.sh
 
@@ -511,7 +511,7 @@ run_verification() {
 print_summary() {
     echo "" | tee -a "$LOG_FILE"
     printf "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}  init-mirror.sh v${VERSION} — 执行摘要${NC}\n" | tee -a "$LOG_FILE"
+    printf "${BOLD}${CYAN}  init-mirror.sh v${SCRIPT_VERSION} — 执行摘要${NC}\n" | tee -a "$LOG_FILE"
     printf "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════${NC}\n" | tee -a "$LOG_FILE"
 
     local mirror_display
@@ -549,7 +549,7 @@ main() {
             --auto)   AUTO_MODE="yes" ;;
             --force)  FORCE_MODE="yes"; AUTO_MODE="yes" ;;
             --help|-h)
-                echo "init-mirror.sh v${VERSION} — Ubuntu 云服务器换源 + 安全全量更新"
+                echo "init-mirror.sh v${SCRIPT_VERSION} — Ubuntu 云服务器换源 + 安全全量更新"
                 echo ""
                 echo "用法: sudo bash $0 [选项]"
                 echo ""
@@ -569,7 +569,7 @@ main() {
 
     echo ""
     printf "${BOLD}${GREEN}╔═══════════════════════════════════════════════════════════╗${NC}\n"
-    printf "${BOLD}${GREEN}║   init-mirror.sh v%-6s — 换源 + 安全全量更新           ║${NC}\n" "$VERSION"
+    printf "${BOLD}${GREEN}║   init-mirror.sh v%-6s — 换源 + 安全全量更新           ║${NC}\n" "$SCRIPT_VERSION"
     printf "${BOLD}${GREEN}╚═══════════════════════════════════════════════════════════╝${NC}\n"
     echo ""
 

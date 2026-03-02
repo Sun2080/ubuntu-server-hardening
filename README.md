@@ -1,6 +1,6 @@
 # Ubuntu Server Hardening & Web Optimization
 
-> **v3.1** | [CHANGELOG](CHANGELOG.md)
+> **v3.2** | [CHANGELOG](CHANGELOG.md)
 
 一套面向 **Ubuntu 22.04 / 24.04 LTS** 的服务器安全加固与 Web 性能优化脚本。
 
@@ -246,8 +246,8 @@ sudo bash /root/.web-optimize-backup/<时间戳>/rollback.sh
 
 ```
 init-mirror.sh          # 换源 + 全量更新脚本 (v1.0)
-sec-harden.sh           # 安全加固脚本 (v3.1)
-web-optimize.sh         # 性能优化脚本 (v3.1)
+sec-harden.sh           # 安全加固脚本 (v3.2)
+web-optimize.sh         # 性能优化脚本 (v3.2)
 README.md               # 本文档
 CHANGELOG.md            # 版本变更记录
 LICENSE                  # MIT 许可证

@@ -4,6 +4,33 @@
 
 ---
 
+## [3.2] — 2026-03-03
+
+### 修复 (实机测试发现)
+- **VERSION 变量被 os-release 覆盖**：`check_os()` 中 `. /etc/os-release` 的 `VERSION` 变量会覆盖脚本自身的 `VERSION="3.1"`，导致 Banner 显示 `v24.04.4 LTS` 而非 `v3.1`。重命名为 `SCRIPT_VERSION`，三个脚本同步修复
+- **pipefail + || echo 导致双重输出**：`set -o pipefail` 下 `$(cmd 2>/dev/null | wc -l || echo "0")` 在管道命令失败时，`wc -l` 输出 `0` 后 `|| echo "0"` 也执行，变量变成 `"0\n0"`，触发 `[[` 的 `syntax error in expression`
+- **BEFORE_STATE 对比表换行错误**：`systemctl is-active` 返回 `inactive`(非零退出码) → `|| echo "未安装"` 追加输出 → 对比表中 Fail2ban/auditd 显示断行
+- **SSH `Protocol 2` 废弃警告**：OpenSSH 9.x (Ubuntu 24.04) 已完全移除 Protocol 1 支持，`Protocol 2` 指令产生 Deprecated 警告，已删除
+- **SSH `ChallengeResponseAuthentication` 废弃**：`KbdInteractiveAuthentication` 已是唯一正式选项，移除冗余的废弃别名
+
+### 安全改进
+- **`confirm_dangerous` 无 tty 默认值**：当 `/dev/tty` 不可用时（CI/CD、cron），默认从 `"y"` 改为 `"n"`，危险操作不再被静默批准（需显式传 `--force`）
+
+### 优化 (web-optimize.sh)
+- **`opcache.fast_shutdown`**：PHP 7.2+ 已移除此选项，改为注释说明
+- **`innodb_buffer_pool_instances`**：不再硬编码为 1，当 buffer_pool ≥ 1024MB 时自动设为 8
+- **`vm.overcommit_memory = 1`**：添加醒目的 OOM 风险注释
+- **`docker port` pipefail 安全**：管道失败时不再追加 `"N/A"` 到正常输出
+- **冗余 `2>&1` 清理**：`&>/dev/null 2>&1` → `&>/dev/null`
+
+### 测试
+- init-mirror.sh：3/3 (100%) — 腾讯云内网镜像
+- sec-harden.sh：19/19 (100%) — Ubuntu 24.04 实机
+- web-optimize.sh：shellcheck 零警告
+- 回滚脚本验证通过
+
+---
+
 ## [init-mirror.sh v1.0] — 2026-03-03
 
 ### 新增

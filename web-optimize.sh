@@ -9,7 +9,7 @@
 #    sudo bash web-optimize.sh --dry-run        # 仅生成配置不应用
 ###############################################################################
 set -Euo pipefail
-VERSION="3.1"
+SCRIPT_VERSION="3.2"
 
 trap '_err_handler $LINENO "$BASH_COMMAND"' ERR
 _err_handler() {
@@ -183,7 +183,7 @@ confirm_dangerous() {
     echo "" | tee -a "$LOG_FILE"
     printf "  ${YELLOW}⚠ 危险操作: %s${NC}\n" "$msg" | tee -a "$LOG_FILE"
     printf "  ${BOLD}确认继续? [y/N]: ${NC}"
-    read -r answer </dev/tty 2>/dev/null || answer="y"
+    read -r answer </dev/tty 2>/dev/null || answer="n"
     case "$answer" in
         [yY]*) return 0 ;;
         *) log "WARN" "用户取消: $msg"; return 1 ;;
@@ -193,12 +193,17 @@ confirm_dangerous() {
 # ─── 运行前状态快照 ──────────────────────────────────────────────────────
 declare -A BEFORE_STATE
 capture_before_state() {
-    BEFORE_STATE[bbr]=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "?")
-    BEFORE_STATE[somaxconn]=$(sysctl -n net.core.somaxconn 2>/dev/null || echo "?")
-    BEFORE_STATE[file_max]=$(sysctl -n fs.file-max 2>/dev/null || echo "?")
-    BEFORE_STATE[swappiness]=$(sysctl -n vm.swappiness 2>/dev/null || echo "?")
-    BEFORE_STATE[tcp_fastopen]=$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null || echo "?")
-    BEFORE_STATE[docker_count]=$(docker ps -q 2>/dev/null | wc -l || echo "0")
+    BEFORE_STATE[bbr]=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null) || true
+    [[ -z "${BEFORE_STATE[bbr]}" ]] && BEFORE_STATE[bbr]="?"
+    BEFORE_STATE[somaxconn]=$(sysctl -n net.core.somaxconn 2>/dev/null) || true
+    [[ -z "${BEFORE_STATE[somaxconn]}" ]] && BEFORE_STATE[somaxconn]="?"
+    BEFORE_STATE[file_max]=$(sysctl -n fs.file-max 2>/dev/null) || true
+    [[ -z "${BEFORE_STATE[file_max]}" ]] && BEFORE_STATE[file_max]="?"
+    BEFORE_STATE[swappiness]=$(sysctl -n vm.swappiness 2>/dev/null) || true
+    [[ -z "${BEFORE_STATE[swappiness]}" ]] && BEFORE_STATE[swappiness]="?"
+    BEFORE_STATE[tcp_fastopen]=$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null) || true
+    [[ -z "${BEFORE_STATE[tcp_fastopen]}" ]] && BEFORE_STATE[tcp_fastopen]="?"
+    BEFORE_STATE[docker_count]=$( { docker ps -q 2>/dev/null || true; } | wc -l )
     BEFORE_STATE[cpu]=$(nproc)
     BEFORE_STATE[mem_total]=$(get_total_mem_mb)
     BEFORE_STATE[mem_avail]=$(get_available_mem_mb)
@@ -338,6 +343,8 @@ vm.dirty_ratio = ${DIRTY_RATIO}
 vm.dirty_background_ratio = ${DIRTY_BG_RATIO}
 vm.vfs_cache_pressure = ${VFS_CACHE_PRESSURE}
 vm.min_free_kbytes = ${MIN_FREE_KBYTES}
+# overcommit_memory=1: Redis 推荐值，允许内核过度分配内存
+# 注意: 在内存紧张的系统上可能加剧 OOM 风险
 vm.overcommit_memory = 1
 EOF
 
@@ -385,7 +392,7 @@ detect_containers() {
         return
     fi
 
-    if ! docker info &>/dev/null 2>&1; then
+    if ! docker info &>/dev/null; then
         log "WARN" "Docker 未运行，跳过容器检测"
         return
     fi
@@ -433,7 +440,8 @@ detect_containers() {
     for container in "$NGINX_CONTAINER" "$PHP_CONTAINER" "$MARIADB_CONTAINER" "$REDIS_CONTAINER"; do
         if [[ -n "$container" ]]; then
             local ports mem
-            ports=$(docker port "$container" 2>/dev/null | tr '\n' ', ' || echo "N/A")
+            ports=$( { docker port "$container" 2>/dev/null || true; } | tr '\n' ', ' )
+            [[ -z "$ports" ]] && ports="N/A"
             mem=$(docker stats "$container" --no-stream --format '{{.MemUsage}}' 2>/dev/null || echo "N/A")
             log "INFO" "  $container — 端口: ${ports:-N/A} | 内存: ${mem:-N/A}"
         fi
@@ -763,7 +771,7 @@ opcache.interned_strings_buffer = 16
 opcache.max_accelerated_files = ${PHP_OPCACHE_FILES}
 opcache.revalidate_freq = ${PHP_OPCACHE_REVALIDATE}
 opcache.save_comments = 1
-opcache.fast_shutdown = 1
+; opcache.fast_shutdown 已在 PHP 7.2+ 移除，无需设置
 opcache.validate_timestamps = 1
 opcache.max_wasted_percentage = 10
 opcache.huge_code_pages = 1
@@ -871,7 +879,7 @@ innodb_io_capacity = 1000
 innodb_io_capacity_max = 2000
 innodb_read_io_threads = 4
 innodb_write_io_threads = 4
-innodb_buffer_pool_instances = 1
+innodb_buffer_pool_instances = $( [[ $buffer_pool_mb -ge 1024 ]] && echo 8 || echo 1 )
 innodb_log_buffer_size = 16M
 innodb_open_files = 4000
 
@@ -1306,7 +1314,7 @@ if [[ $load_1m -gt $load_limit ]]; then
 fi
 
 # Docker 容器检查
-if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+if command -v docker &>/dev/null && docker info &>/dev/null; then
     while IFS= read -r container; do
         [[ -z "$container" ]] && continue
         name=$(echo "$container" | awk '{print $NF}')
@@ -1367,7 +1375,7 @@ find /var/log -name "*.[0-9]" -mtime +30 -delete 2>/dev/null || true
 log "旧日志文件已清理"
 
 # Docker 垃圾清理
-if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+if command -v docker &>/dev/null && docker info &>/dev/null; then
     docker system prune -f >/dev/null 2>&1 || true
     # 清理悬空镜像
     docker image prune -f >/dev/null 2>&1 || true
@@ -1415,7 +1423,7 @@ log() { echo "[$(ts)] $*" >> "$LOG"; }
 log "=== 刷新 OOM 防护 ==="
 
 # 确保关键 Docker 容器设置 restart=unless-stopped
-if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+if command -v docker &>/dev/null && docker info &>/dev/null; then
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         name=$(echo "$line" | awk '{print $NF}')
@@ -1572,7 +1580,7 @@ generate_report() {
     cat > "$DIAG_FILE" << YAMLEOF
 ---
 # web-optimize.sh 诊断报告
-version: "$VERSION"
+version: "$SCRIPT_VERSION"
 generated_at: "$(date -Iseconds)"
 hostname: "$(hostname)"
 os: "$(. /etc/os-release && echo "$PRETTY_NAME")"
@@ -1622,7 +1630,7 @@ interactive_menu() {
     printf "  磁盘: %s\n" "$(df -h / | awk 'NR==2{print $2" 总量, "$3" 已用, "$5" 使用率"}')"
 
     local docker_count
-    docker_count=$(docker ps -q 2>/dev/null | wc -l)
+    docker_count=$( { docker ps -q 2>/dev/null || true; } | wc -l )
     printf "  Docker: %s 个容器运行中\n" "$docker_count"
 
     if [[ $docker_count -gt 0 ]]; then
@@ -1760,7 +1768,7 @@ main() {
             --dry-run) DRY_RUN="yes" ;;
             --force) FORCE_MODE="yes" ;;
             --help|-h)
-                echo "web-optimize.sh v$VERSION — Web 服务器性能优化脚本"
+                echo "web-optimize.sh v$SCRIPT_VERSION — Web 服务器性能优化脚本"
                 echo ""
                 echo "用法:"
                 echo "  sudo bash $0                  # 交互模式"
@@ -1777,7 +1785,7 @@ main() {
 
     printf "${BOLD}${GREEN}"
     printf "╔═══════════════════════════════════════════════════════════════╗\n"
-    printf "║     Web 服务器性能优化脚本 web-optimize.sh v$VERSION        ║\n"
+    printf "║     Web 服务器性能优化脚本 web-optimize.sh v$SCRIPT_VERSION        ║\n"
     printf "╚═══════════════════════════════════════════════════════════════╝\n"
     printf "${NC}\n"
 
