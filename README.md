@@ -13,17 +13,32 @@
 
 ## 快速开始
 
-### 一键下载
+### 一键下载（私有仓库）
+
+先在 GitHub 创建 Personal Access Token (classic)，勾选 `repo` 权限，然后：
 
 ```bash
+# 设置你的 Token（只需执行一次）
+TOKEN="ghp_你的Token"
+
 # 下载两个脚本
-curl -fsSL https://raw.githubusercontent.com/Sun2080/ubuntu-server-hardening/main/sec-harden.sh -o sec-harden.sh
-curl -fsSL https://raw.githubusercontent.com/Sun2080/ubuntu-server-hardening/main/web-optimize.sh -o web-optimize.sh
+curl -fsSL -H "Authorization: token $TOKEN" \
+  "https://raw.githubusercontent.com/Sun2080/ubuntu-server-hardening/main/sec-harden.sh" \
+  -o sec-harden.sh
+
+curl -fsSL -H "Authorization: token $TOKEN" \
+  "https://raw.githubusercontent.com/Sun2080/ubuntu-server-hardening/main/web-optimize.sh" \
+  -o web-optimize.sh
 
 # 先加固安全，再优化性能
 sudo bash sec-harden.sh
 sudo bash web-optimize.sh
 ```
+
+> **快捷方式**：如果目标服务器已安装 `gh` CLI 并登录，也可以直接克隆：
+> ```bash
+> gh repo clone Sun2080/ubuntu-server-hardening && cd ubuntu-server-hardening
+> ```
 
 ### 用法
 
