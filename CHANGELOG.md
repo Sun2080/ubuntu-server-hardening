@@ -4,6 +4,28 @@
 
 ---
 
+## [3.1] — 2026-03-03
+
+### 修复 (紧急 — SSH 锁死)
+- **hosts.deny 锁人 Bug**：`hosts.deny ALL:ALL` 搭配的 `hosts.allow` 只加了 Docker 内网网段，忘加 `sshd: ALL`，导致所有外部 SSH 连接被 TCP wrappers 拒绝，**完全无法远程登录**
+- **Ubuntu 24.04 ssh.socket 覆盖端口**：`sshd_config` 写的 `Port 2222` 被 systemd `ssh.socket`（硬编码 `ListenStream=22`）覆盖，SSH 实际监听 22 但 UFW 只放行 2222 → **端口完全错位，无法连接**
+- **UFW reset 后无保护窗口**：`ufw reset` + `default deny` 之间如果脚本崩溃，SSH 会被锁死。改为 reset 后立即放行 SSH
+
+### 新增
+- SSH 模块：自动检测并覆盖 `ssh.socket` 端口（通过 systemd drop-in override）
+- SSH 模块：`restart` 替代 `reload`，确保端口变更实际生效
+- SSH 模块：重启后主动验证端口是否真正监听，失败立即告警
+- UFW 模块：启用后验证 SSH 端口确实被放行，失败则紧急添加
+- UFW 模块：reset 后立即放行当前 SSH 端口 + 目标端口（防止中途锁死）
+- `hosts.allow` 中 `sshd: ALL` 放在第一行（安全由 UFW+Fail2ban 保障，TCP wrappers 不再阻断 SSH）
+- 验证项新增"SSH 实际监听端口"检查（从 18 项增至 19 项）
+
+### 测试
+- sec-harden.sh：19/19 (100%)
+- web-optimize.sh：15/15 (100%)
+
+---
+
 ## [3.0] — 2026-03-02
 
 ### 修复

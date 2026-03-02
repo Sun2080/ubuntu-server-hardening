@@ -9,7 +9,7 @@
 #    sudo bash web-optimize.sh --dry-run        # 仅生成配置不应用
 ###############################################################################
 set -Euo pipefail
-VERSION="3.0"
+VERSION="3.1"
 
 trap '_err_handler $LINENO "$BASH_COMMAND"' ERR
 _err_handler() {

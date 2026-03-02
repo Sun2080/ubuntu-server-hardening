@@ -9,7 +9,7 @@
 #    SSH_MODE=dev sudo bash sec-harden.sh --auto  # 开发模式
 ###############################################################################
 set -Euo pipefail
-VERSION="3.0"
+VERSION="3.1"
 
 # ─── ERR trap ────────────────────────────────────────────────────────────────
 trap '_err_handler $LINENO "$BASH_COMMAND"' ERR
@@ -333,16 +333,50 @@ harden_ssh() {
         log "INFO" "已生成 Ed25519 主机密钥"
     fi
 
-    # 验证配置
+    # Ubuntu 22.04+ 使用 systemd ssh.socket 做 socket activation
+    # ssh.socket 硬编码 ListenStream=22 会覆盖 sshd_config 中的 Port 设置
+    # 必须同步修改 ssh.socket，否则端口变更不生效！
+    if systemctl is-enabled ssh.socket &>/dev/null 2>&1; then
+        local socket_override="/etc/systemd/system/ssh.socket.d"
+        mkdir -p "$socket_override"
+        # 备份现有 override
+        [[ -f "$socket_override/override.conf" ]] && backup_file "$socket_override/override.conf"
+        cat > "$socket_override/override.conf" << EOF
+# sec-harden.sh: 同步 SSH 端口到 ssh.socket
+[Socket]
+ListenStream=
+ListenStream=${SSH_PORT}
+EOF
+        systemctl daemon-reload
+        log "INFO" "已更新 ssh.socket 端口为 $SSH_PORT (systemd socket activation)"
+        # 回滚
+        echo "rm -f '$socket_override/override.conf' && systemctl daemon-reload && systemctl restart ssh.socket 2>/dev/null || true" >> "$ROLLBACK_SCRIPT"
+    fi
+
+    # 验证配置并重启（非 reload，确保新端口生效）
     if sshd -t 2>/dev/null; then
-        systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
-        log "INFO" "SSH 配置已应用并重载"
+        # 重启而非 reload，因为 reload 不会重新绑定端口
+        if systemctl is-active ssh.socket &>/dev/null 2>&1; then
+            systemctl restart ssh.socket 2>/dev/null || true
+            systemctl restart ssh.service 2>/dev/null || systemctl restart sshd.service 2>/dev/null || true
+        else
+            systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+        fi
+        log "INFO" "SSH 配置已应用并重启 (端口 $SSH_PORT)"
     else
         log "ERROR" "SSH 配置验证失败，请检查 $sshd_conf"
     fi
 
-    # 回滚脚本追加 SSH 重载
-    echo "systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true" >> "$ROLLBACK_SCRIPT"
+    # 关键安全检查: 确认 SSH 确实在新端口监听
+    sleep 1
+    if ss -tlnp | grep -q ":${SSH_PORT} "; then
+        log "INFO" "✓ SSH 端口 $SSH_PORT 监听已确认"
+    else
+        log "ERROR" "✗ SSH 端口 $SSH_PORT 未监听！请立即检查 (当前监听: $(ss -tlnp | grep ssh | awk '{print $4}'))"
+    fi
+
+    # 回滚脚本追加 SSH 重启
+    echo "systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true" >> "$ROLLBACK_SCRIPT"
 }
 
 ###############################################################################
@@ -362,11 +396,22 @@ setup_ufw() {
     # 重置 UFW（非交互）
     echo "y" | ufw reset >/dev/null 2>&1
 
+    # ⚠ 关键安全: 重置后立即放行 SSH，防止脚本中途失败导致锁死
+    # 同时放行当前实际监听端口（可能和目标端口不同）
+    local cur_ssh_listen
+    cur_ssh_listen=$(ss -tlnp 2>/dev/null | grep sshd | awk '{print $4}' | grep -oP '\d+$' | head -1)
+    [[ -z "$cur_ssh_listen" ]] && cur_ssh_listen="22"
+    ufw allow "$SSH_PORT"/tcp comment "SSH" >/dev/null 2>&1
+    if [[ "$cur_ssh_listen" != "$SSH_PORT" ]]; then
+        ufw allow "$cur_ssh_listen"/tcp comment "SSH-current" >/dev/null 2>&1
+        log "INFO" "UFW: 安全放行当前SSH端口 $cur_ssh_listen + 目标端口 $SSH_PORT"
+    fi
+
     # 默认策略
     ufw default deny incoming >/dev/null 2>&1
     ufw default allow outgoing >/dev/null 2>&1
 
-    # 放行 SSH
+    # 放行 SSH（精细规则覆盖上面的通用规则）
     if [[ -n "$RESTRICT_IP" ]]; then
         IFS=',' read -ra IPS <<< "$RESTRICT_IP"
         for ip in "${IPS[@]}"; do
@@ -436,6 +481,14 @@ DOCKERUFW
     fi
     echo "y" | ufw enable >/dev/null 2>&1
     log "INFO" "UFW 防火墙已启用"
+
+    # 验证: 确认 SSH 端口被放行
+    if ufw status | grep -q "$SSH_PORT/tcp.*ALLOW"; then
+        log "INFO" "✓ UFW 已确认放行 SSH 端口 $SSH_PORT"
+    else
+        log "ERROR" "✗ UFW 未放行 SSH 端口 $SSH_PORT！紧急添加..."
+        ufw allow "$SSH_PORT"/tcp comment "SSH-emergency" >/dev/null 2>&1
+    fi
 
     # 回滚
     echo "echo y | ufw disable && echo '已禁用 UFW'" >> "$ROLLBACK_SCRIPT"
@@ -1131,25 +1184,28 @@ EOF
     backup_file "$issue"
     cp "$issue_net" "$issue"
 
-    # hosts.deny (排除 localhost 和 Docker 网段)
-    local hosts_deny="/etc/hosts.deny"
-    backup_file "$hosts_deny"
-    if ! grep -q 'ALL: ALL' "$hosts_deny" 2>/dev/null; then
-        echo "ALL: ALL" >> "$hosts_deny"
-        log "INFO" "hosts.deny: ALL: ALL"
-    fi
-    # hosts.allow — 确保 localhost 和 Docker 不受 hosts.deny 影响
+    # hosts.allow — 必须在 hosts.deny 之前配置，否则会锁死 SSH!
     local hosts_allow="/etc/hosts.allow"
     backup_file "$hosts_allow"
-    if ! grep -q '127.0.0.1' "$hosts_allow" 2>/dev/null; then
+    if ! grep -q 'sshd: ALL' "$hosts_allow" 2>/dev/null; then
         cat >> "$hosts_allow" << 'HOSTALLOW'
-# sec-harden.sh: 允许本地和 Docker 内部访问
+# sec-harden.sh: SSH 必须允许所有来源 (安全由 UFW+Fail2ban 保障)
+sshd: ALL
+# 允许本地和 Docker 内部通信
 ALL: 127.0.0.1
 ALL: 172.16.0.0/12
 ALL: 192.168.0.0/16
 ALL: 10.0.0.0/8
 HOSTALLOW
-        log "INFO" "hosts.allow: 已添加本地/Docker 白名单"
+        log "INFO" "hosts.allow: 已添加 sshd:ALL + 本地/Docker 白名单"
+    fi
+
+    # hosts.deny (hosts.allow 优先级更高，匹配后不再查 deny)
+    local hosts_deny="/etc/hosts.deny"
+    backup_file "$hosts_deny"
+    if ! grep -q 'ALL: ALL' "$hosts_deny" 2>/dev/null; then
+        echo "ALL: ALL" >> "$hosts_deny"
+        log "INFO" "hosts.deny: ALL: ALL (sshd 已在 hosts.allow 中豁免)"
     fi
 
     log "INFO" "Shell 安全: TMOUT=$SHELL_TMOUT, Banner 已设置"
@@ -1269,6 +1325,8 @@ run_verification() {
     local sshd_conf="/etc/ssh/sshd_config"
     check_result "SSH 端口已更改为 $SSH_PORT" \
         "$(grep -qE "^Port $SSH_PORT" "$sshd_conf" 2>/dev/null && echo pass || echo fail)"
+    check_result "SSH 实际监听端口 $SSH_PORT" \
+        "$(ss -tlnp 2>/dev/null | grep -q ":${SSH_PORT} " && echo pass || echo fail)"
     check_result "SSH 禁止空密码" \
         "$(grep -qE '^PermitEmptyPasswords no' "$sshd_conf" 2>/dev/null && echo pass || echo fail)"
     check_result "SSH PermitRootLogin=prohibit-password" \
