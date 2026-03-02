@@ -259,7 +259,22 @@ harden_ssh() {
     ssh_config+="Port ${SSH_PORT}\n"
     ssh_config+="AddressFamily inet\n"
     ssh_config+="\n# 认证\n"
-    ssh_config+="PermitRootLogin prohibit-password\n"
+
+    # ⚠ 防锁定: 检查是否存在有 sudo 权限的非 root 用户
+    local has_sudo_user=false
+    local u
+    for u in $(awk -F: '$3>=1000 && $7!~/nologin|false/{print $1}' /etc/passwd); do
+        if groups "$u" 2>/dev/null | grep -qE '\b(sudo|wheel)\b'; then
+            has_sudo_user=true; break
+        fi
+    done
+    if [[ "$has_sudo_user" == false && "$has_keys" == false ]]; then
+        ssh_config+="PermitRootLogin yes\n"
+        log "WARN" "⚠ 无 sudo 用户且无 SSH 密钥，保留 root 完整登录（请尽快创建普通用户并配置密钥）"
+    else
+        ssh_config+="PermitRootLogin prohibit-password\n"
+    fi
+
     ssh_config+="PermitEmptyPasswords no\n"
     ssh_config+="MaxAuthTries 3\n"
     ssh_config+="MaxSessions 5\n"
@@ -364,6 +379,11 @@ EOF
 
     # 验证配置并重启（非 reload，确保新端口生效）
     if sshd -t 2>/dev/null; then
+        # ⚠ 防锁定: 如果 UFW 已启用，先放行新端口再重启 SSH
+        if ufw status 2>/dev/null | grep -qi 'active'; then
+            ufw allow "$SSH_PORT"/tcp comment "SSH-pre-restart" >/dev/null 2>&1
+            log "INFO" "UFW 已启用，预先放行 SSH 端口 $SSH_PORT"
+        fi
         # 重启而非 reload，因为 reload 不会重新绑定端口
         if systemctl is-active ssh.socket &>/dev/null 2>&1; then
             systemctl restart ssh.socket 2>/dev/null || true
@@ -373,15 +393,31 @@ EOF
         fi
         log "INFO" "SSH 配置已应用并重启 (端口 $SSH_PORT)"
     else
-        log "ERROR" "SSH 配置验证失败，请检查 $sshd_conf"
+        log "ERROR" "SSH 配置验证失败，正在回滚..."
+        cp "${BACKUP_DIR}/etc/ssh/sshd_config" "$sshd_conf" 2>/dev/null || true
+        log "ERROR" "已回滚 sshd_config，SSH 将使用原配置"
+        return
     fi
 
-    # 关键安全检查: 确认 SSH 确实在新端口监听
+    # 关键安全检查: 确认 SSH 确实在新端口监听，失败则自动回滚
     sleep 1
     if ss -tlnp | grep -q ":${SSH_PORT} "; then
         log "INFO" "✓ SSH 端口 $SSH_PORT 监听已确认"
     else
-        log "ERROR" "✗ SSH 端口 $SSH_PORT 未监听！请立即检查 (当前监听: $(ss -tlnp | grep ssh | awk '{print $4}'))"
+        log "ERROR" "✗ SSH 端口 $SSH_PORT 未监听！正在自动回滚配置..."
+        cp "${BACKUP_DIR}/etc/ssh/sshd_config" "$sshd_conf" 2>/dev/null || true
+        # 回滚 ssh.socket override
+        if [[ -f "${BACKUP_DIR}/etc/systemd/system/ssh.socket.d/override.conf" ]]; then
+            cp "${BACKUP_DIR}/etc/systemd/system/ssh.socket.d/override.conf" /etc/systemd/system/ssh.socket.d/override.conf 2>/dev/null || true
+        else
+            rm -f /etc/systemd/system/ssh.socket.d/override.conf 2>/dev/null || true
+        fi
+        systemctl daemon-reload 2>/dev/null || true
+        if systemctl is-active ssh.socket &>/dev/null 2>&1; then
+            systemctl restart ssh.socket 2>/dev/null || true
+        fi
+        systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+        log "ERROR" "已回滚 SSH 配置并重启 (当前监听: $(ss -tlnp | grep ssh | awk '{print $4}'))"
     fi
 
     # 回滚脚本追加 SSH 重启
@@ -407,31 +443,32 @@ setup_ufw() {
 
     # ⚠ 关键安全: 重置后立即放行 SSH，防止脚本中途失败导致锁死
     # 同时放行当前实际监听端口（可能和目标端口不同）
+    # 注意: RESTRICT_IP 限制从一开始就生效，避免宽泛规则覆盖精确规则
     local cur_ssh_listen
     cur_ssh_listen=$(ss -tlnp 2>/dev/null | grep sshd | awk '{print $4}' | grep -oP '\d+$' | head -1)
     [[ -z "$cur_ssh_listen" ]] && cur_ssh_listen="22"
-    ufw allow "$SSH_PORT"/tcp comment "SSH" >/dev/null 2>&1
-    if [[ "$cur_ssh_listen" != "$SSH_PORT" ]]; then
-        ufw allow "$cur_ssh_listen"/tcp comment "SSH-current" >/dev/null 2>&1
-        log "INFO" "UFW: 安全放行当前SSH端口 $cur_ssh_listen + 目标端口 $SSH_PORT"
+    if [[ -n "$RESTRICT_IP" ]]; then
+        IFS=',' read -ra IPS <<< "$RESTRICT_IP"
+        for ip in "${IPS[@]}"; do
+            ip=$(echo "$ip" | xargs)
+            ufw allow from "$ip" to any port "$SSH_PORT" proto tcp comment "SSH from $ip" >/dev/null 2>&1
+            if [[ "$cur_ssh_listen" != "$SSH_PORT" ]]; then
+                ufw allow from "$ip" to any port "$cur_ssh_listen" proto tcp comment "SSH-current from $ip" >/dev/null 2>&1
+            fi
+            log "INFO" "UFW: 放行 SSH($SSH_PORT) 来自 $ip"
+        done
+    else
+        ufw allow "$SSH_PORT"/tcp comment "SSH" >/dev/null 2>&1
+        if [[ "$cur_ssh_listen" != "$SSH_PORT" ]]; then
+            ufw allow "$cur_ssh_listen"/tcp comment "SSH-current" >/dev/null 2>&1
+            log "INFO" "UFW: 安全放行当前SSH端口 $cur_ssh_listen + 目标端口 $SSH_PORT"
+        fi
+        log "INFO" "UFW: 放行 SSH($SSH_PORT)"
     fi
 
     # 默认策略
     ufw default deny incoming >/dev/null 2>&1
     ufw default allow outgoing >/dev/null 2>&1
-
-    # 放行 SSH（精细规则覆盖上面的通用规则）
-    if [[ -n "$RESTRICT_IP" ]]; then
-        IFS=',' read -ra IPS <<< "$RESTRICT_IP"
-        for ip in "${IPS[@]}"; do
-            ip=$(echo "$ip" | xargs)  # 去除空格
-            ufw allow from "$ip" to any port "$SSH_PORT" proto tcp comment "SSH from $ip" >/dev/null 2>&1
-            log "INFO" "UFW: 放行 SSH($SSH_PORT) 来自 $ip"
-        done
-    else
-        ufw allow "$SSH_PORT"/tcp comment "SSH" >/dev/null 2>&1
-        log "INFO" "UFW: 放行 SSH($SSH_PORT)"
-    fi
 
     # 放行 HTTP/HTTPS
     if [[ "$ALLOW_HTTP" == "yes" ]]; then
@@ -509,6 +546,19 @@ DOCKERUFW
 setup_fail2ban() {
     step_banner 3 "Fail2ban 防暴力破解"
 
+    # ⚠ 检测已有 Fail2ban（可能由 1Panel 等面板安装并管理）
+    if systemctl is-active fail2ban &>/dev/null; then
+        log "WARN" "检测到 Fail2ban 已在运行（可能由 1Panel 或其他面板安装）"
+        if ! confirm_dangerous "将覆盖现有 Fail2ban 配置（已备份），如果面板已管理 Fail2ban 建议跳过"; then
+            log "WARN" "跳过 Fail2ban 配置（保留现有面板管理）"
+            return
+        fi
+        # 备份 jail.d 目录下的面板配置
+        for f in /etc/fail2ban/jail.d/*.conf /etc/fail2ban/jail.d/*.local; do
+            [[ -f "$f" ]] && backup_file "$f"
+        done
+    fi
+
     apt-get install -y --no-install-recommends fail2ban >/dev/null 2>&1 || true
 
     backup_file "/etc/fail2ban/jail.local"
@@ -567,7 +617,7 @@ bantime  = ${FAIL2BAN_BANTIME}
 enabled  = true
 filter   = recidive
 logpath  = /var/log/fail2ban.log
-bantime  = 604800
+bantime  = 86400
 findtime = 86400
 maxretry = 3
 EOF
@@ -653,8 +703,8 @@ kernel.yama.ptrace_scope = 2
 # 禁止非特权用户查看 dmesg
 kernel.dmesg_restrict = 1
 
-# 禁用 SysRq
-kernel.sysrq = 0
+# SysRq: 仅允许 sync + remount-ro + reboot (紧急恢复最小集)
+kernel.sysrq = 176
 
 # 禁止非特权用户使用 bpf / userfaultfd
 kernel.unprivileged_bpf_disabled = 1
@@ -807,7 +857,7 @@ EOF
 deny = ${FAILLOCK_ATTEMPTS}
 unlock_time = ${FAILLOCK_LOCKTIME}
 fail_interval = 900
-even_deny_root
+# even_deny_root  # 不锁定 root，防止攻击者通过故意失败登录将管理员锁在门外
 root_unlock_time = ${FAILLOCK_LOCKTIME}
 dir = /var/run/faillock
 audit
