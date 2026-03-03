@@ -93,7 +93,7 @@ confirm_dangerous() {
         return 0
     fi
     echo "" | tee -a "$LOG_FILE"
-    printf '  %b⚠ 危险操作: %s%b\n' "${YELLOW}" "${NC}" "$msg" | tee -a "$LOG_FILE"
+    printf '  %b⚠ 危险操作:%b %s\n' "${YELLOW}" "${NC}" "$msg" | tee -a "$LOG_FILE"
     printf '  %b确认继续? [y/N]: %b' "${BOLD}" "${NC}"
     read -r answer </dev/tty 2>/dev/null || answer="n"
     case "$answer" in
@@ -107,7 +107,7 @@ declare -A BEFORE_STATE
 capture_before_state() {
     # 注意: 由于 set -o pipefail，管道命令失败时 || 会额外输出，
     # 因此将 || 放在 $() 之外，避免双重输出
-    BEFORE_STATE[ssh_port]=$(grep -E '^Port ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}') || true
+    BEFORE_STATE[ssh_port]=$(grep -E '^Port ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1) || true
     [[ -z "${BEFORE_STATE[ssh_port]}" ]] && BEFORE_STATE[ssh_port]="22"
     BEFORE_STATE[ssh_pwd_auth]=$(grep -E '^PasswordAuthentication ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}') || true
     [[ -z "${BEFORE_STATE[ssh_pwd_auth]}" ]] && BEFORE_STATE[ssh_pwd_auth]="unknown"
@@ -222,7 +222,7 @@ harden_ssh() {
 
     # 危险操作确认: SSH 端口更改
     local cur_port
-    cur_port=$(grep -E '^Port ' "$sshd_conf" 2>/dev/null | awk '{print $2}' || echo "22")
+    cur_port=$(grep -E '^Port ' "$sshd_conf" 2>/dev/null | awk '{print $2}' | head -1 || echo "22")
     [[ -z "$cur_port" ]] && cur_port="22"
     if [[ "$cur_port" != "$SSH_PORT" ]]; then
         if ! confirm_dangerous "SSH 端口将从 $cur_port 更改为 $SSH_PORT (请确保云安全组/防火墙已放行新端口)"; then
@@ -1306,13 +1306,16 @@ setup_aide() {
 
     # 初始化数据库 (超时 300 秒以防止卡死; yes 自动应答覆盖提示)
     log "INFO" "正在初始化 AIDE 数据库（可能需要几分钟…）"
+    local aide_init_ok=true
     yes | timeout 300 aideinit >/dev/null 2>&1 || timeout 300 aide --init >/dev/null 2>&1 || {
         log "WARN" "AIDE 初始化超时或失败，可稍后手动运行: aideinit"
+        aide_init_ok=false
     }
 
     # 如果生成了新数据库，移动到正确位置
     if [[ -f /var/lib/aide/aide.db.new ]]; then
         cp /var/lib/aide/aide.db.new /var/lib/aide/aide.db 2>/dev/null || true
+        aide_init_ok=true  # 数据库实际存在，视为成功
     fi
 
     # 每日自动检查 cron
@@ -1328,7 +1331,11 @@ find /var/log/aide -name "*.log" -mtime +30 -delete 2>/dev/null || true
 AIDECRON
     chmod 755 "$aide_cron"
 
-    log "INFO" "AIDE 已初始化，每日自动检查已配置"
+    if [[ "$aide_init_ok" == true ]]; then
+        log "INFO" "AIDE 已初始化，每日自动检查已配置"
+    else
+        log "WARN" "AIDE 数据库未就绪，每日检查已配置但首次运行可能失败"
+    fi
 
     echo "rm -f '$aide_cron' && echo '已移除 AIDE 定时检查'" >> "$ROLLBACK_SCRIPT"
 }
@@ -1665,7 +1672,7 @@ show_final_summary() {
     printf '%b├─────────────────────┼──────────────────┼──────────────────┤%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
 
     local after_port after_pwd after_root after_ufw after_f2b after_sync after_aslr after_core after_audit
-    after_port=$(grep -E '^Port ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "?")
+    after_port=$(grep -E '^Port ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1 || echo "?")
     after_pwd=$(grep -E '^PasswordAuthentication ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "?")
     after_root=$(grep -E '^PermitRootLogin ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "?")
     after_ufw=$(ufw status 2>/dev/null | head -1 || echo "?")
