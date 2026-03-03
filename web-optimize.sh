@@ -1049,13 +1049,23 @@ HEADER
         # 通过 Docker inspect 自动检测宿主机挂载路径 (兼容 1Panel / 宝塔 / 自定义)
         local nginx_host_conf=""
         local nginx_host_confd=""
-        # 尝试常见 Nginx 配置容器路径的宿主机映射
+        # 尝试常见 Nginx 配置容器路径的宿主机映射 (目录挂载)
         local _nc
         _nc=$(detect_host_mount "$NGINX_CONTAINER" "/usr/local/openresty/nginx/conf")
         [[ -z "$_nc" ]] && _nc=$(detect_host_mount "$NGINX_CONTAINER" "/etc/nginx")
         if [[ -n "$_nc" && -f "$_nc/nginx.conf" ]]; then
             nginx_host_conf="$_nc/nginx.conf"
-            log "INFO" "通过 Docker mount 检测到 Nginx 配置: $_nc"
+            log "INFO" "通过 Docker mount 检测到 Nginx 配置目录: $_nc"
+        fi
+        # 1Panel 单文件挂载: nginx.conf 直接 bind-mount
+        if [[ -z "$nginx_host_conf" ]]; then
+            local _nf
+            _nf=$(detect_host_mount "$NGINX_CONTAINER" "/usr/local/openresty/nginx/conf/nginx.conf")
+            [[ -z "$_nf" ]] && _nf=$(detect_host_mount "$NGINX_CONTAINER" "/etc/nginx/nginx.conf")
+            if [[ -n "$_nf" && -f "$_nf" ]]; then
+                nginx_host_conf="$_nf"
+                log "INFO" "通过 Docker mount 检测到 Nginx 配置文件: $_nf"
+            fi
         fi
         # 检测 conf.d 宿主机目录 (1Panel 的 conf.d 可能在不同路径)
         local _ncd
@@ -1173,7 +1183,7 @@ EOF
         _mc=$(detect_host_mount "$MARIADB_CONTAINER" "/etc/mysql/conf.d")
         [[ -z "$_mc" ]] && _mc=$(detect_host_mount "$MARIADB_CONTAINER" "/etc/mysql/mariadb.conf.d")
         [[ -z "$_mc" ]] && _mc=$(detect_host_mount "$MARIADB_CONTAINER" "/etc/my.cnf.d")
-        # 检测整个 /etc/mysql 挂载 (常见于 1Panel)
+        # 检测整个 /etc/mysql 挂载
         if [[ -z "$_mc" ]]; then
             local _mroot
             _mroot=$(detect_host_mount "$MARIADB_CONTAINER" "/etc/mysql")
@@ -1181,6 +1191,19 @@ EOF
                 mariadb_host_conf="$_mroot/my.cnf"
                 mkdir -p "$_mroot/conf.d" 2>/dev/null
                 _mc="$_mroot/conf.d"
+            fi
+        fi
+        # 1Panel 单文件挂载: my.cnf 直接 bind-mount
+        if [[ -z "$_mc" ]]; then
+            local _mf
+            _mf=$(detect_host_mount "$MARIADB_CONTAINER" "/etc/mysql/my.cnf")
+            [[ -z "$_mf" ]] && _mf=$(detect_host_mount "$MARIADB_CONTAINER" "/etc/my.cnf")
+            if [[ -n "$_mf" && -f "$_mf" ]]; then
+                mariadb_host_conf="$_mf"
+                local _mdir
+                _mdir=$(dirname "$_mf")
+                mkdir -p "$_mdir/conf.d" 2>/dev/null
+                _mc="$_mdir/conf.d"
             fi
         fi
         if [[ -n "$_mc" ]]; then
@@ -1256,14 +1279,28 @@ EOF
             redis_host_conf=$(docker inspect "$REDIS_CONTAINER" --format='{{range .Mounts}}{{if eq .Destination "/usr/local/etc/redis/redis.conf"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)
         fi
 
+        # 检测容器内 Redis 配置文件的实际路径 (用于备份)
+        local redis_container_conf=""
+        redis_container_conf=$(docker exec "$REDIS_CONTAINER" sh -c 'for f in /etc/redis/redis.conf /usr/local/etc/redis/redis.conf; do [ -f "$f" ] && echo "$f" && break; done' 2>/dev/null || true)
+
         cat >> "$APPLY_SCRIPT" << EOF
 
 # ═══ Redis: $REDIS_CONTAINER ═══
 log "应用 Redis 配置到容器: $REDIS_CONTAINER"
 
 # 备份
-backup_from_container "$REDIS_CONTAINER" "/usr/local/etc/redis/redis.conf" "redis.conf" 2>/dev/null || true
-backup_from_container "$REDIS_CONTAINER" "/etc/redis/redis.conf" "redis.conf" 2>/dev/null || true
+EOF
+        if [[ -n "$redis_host_conf" && -f "$redis_host_conf" ]]; then
+            cat >> "$APPLY_SCRIPT" << EOF
+cp -a "$redis_host_conf" "\$BACKUP_DIR/redis.conf.bak" 2>/dev/null || true
+EOF
+        elif [[ -n "$redis_container_conf" ]]; then
+            cat >> "$APPLY_SCRIPT" << EOF
+backup_from_container "$REDIS_CONTAINER" "$redis_container_conf" "redis.conf"
+EOF
+        fi
+
+        cat >> "$APPLY_SCRIPT" << EOF
 
 # 尝试通过 CONFIG SET 在线应用（不需要重启）
 docker exec "$REDIS_CONTAINER" redis-cli $redis_auth_flag CONFIG SET maxmemory "${redis_actual_mem}" 2>/dev/null || true

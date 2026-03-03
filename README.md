@@ -153,6 +153,7 @@ done
 
 ### 用法
 
+cd ~/ubuntu-server-hardening
 ```bash
 # ========== init-mirror.sh ==========
 sudo bash init-mirror.sh                  # 交互模式（选择云厂商）
