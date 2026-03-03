@@ -1280,9 +1280,9 @@ setup_aide() {
 
     apt-get install -y --no-install-recommends aide aide-common >/dev/null 2>&1 || true
 
-    # 初始化数据库 (超时 300 秒以防止卡死)
+    # 初始化数据库 (超时 300 秒以防止卡死; yes 自动应答覆盖提示)
     log "INFO" "正在初始化 AIDE 数据库（可能需要几分钟…）"
-    timeout 300 aideinit 2>/dev/null || timeout 300 aide --init 2>/dev/null || {
+    yes | timeout 300 aideinit >/dev/null 2>&1 || timeout 300 aide --init >/dev/null 2>&1 || {
         log "WARN" "AIDE 初始化超时或失败，可稍后手动运行: aideinit"
     }
 
