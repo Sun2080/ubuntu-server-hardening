@@ -1623,6 +1623,8 @@ main() {
             log "INFO" "DRY-RUN 模式: 仅生成配置，不修改系统"
         else
             log "INFO" "自动模式启动"
+            # --auto 模式下也自动应用 Docker 配置 (有 confirm_dangerous 保护)
+            AUTO_APPLY="yes"
         fi
     fi
 
