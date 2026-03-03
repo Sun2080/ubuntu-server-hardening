@@ -92,6 +92,11 @@ check_os() {
         log "ERROR" "此脚本仅支持 Ubuntu 系统，当前: $ID"
         exit 1
     fi
+    # 版本兼容性预警: 仅在 22.04/24.04 上充分测试
+    case "${VERSION_ID:-}" in
+        22.04|24.04) ;;
+        *) log "WARN" "此脚本仅在 Ubuntu 22.04/24.04 LTS 上测试，当前: ${VERSION_ID:-unknown}，部分功能可能不兼容" ;;
+    esac
     UBUNTU_CODENAME="${VERSION_CODENAME:-$(lsb_release -cs 2>/dev/null || echo 'unknown')}"
     log "INFO" "检测到 $PRETTY_NAME ($UBUNTU_CODENAME, 架构 $(dpkg --print-architecture))"
 

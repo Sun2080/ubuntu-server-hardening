@@ -9,7 +9,7 @@
 #    sudo bash web-optimize.sh --dry-run        # 仅生成配置不应用
 ###############################################################################
 set -Euo pipefail
-SCRIPT_VERSION="3.6"
+SCRIPT_VERSION="3.7"
 
 trap '_err_handler $LINENO "$BASH_COMMAND"' ERR
 _err_handler() {
@@ -31,7 +31,7 @@ SWAPPINESS="${SWAPPINESS:-10}"
 DIRTY_RATIO="${DIRTY_RATIO:-15}"
 DIRTY_BG_RATIO="${DIRTY_BG_RATIO:-5}"
 VFS_CACHE_PRESSURE="${VFS_CACHE_PRESSURE:-50}"
-MIN_FREE_KBYTES="${MIN_FREE_KBYTES:-65536}"
+MIN_FREE_KBYTES="${MIN_FREE_KBYTES:-auto}"    # auto=按内存动态计算
 
 # Nginx/OpenResty
 NGINX_WORKER_CONNECTIONS="${NGINX_WORKER_CONNECTIONS:-4096}"
@@ -144,6 +144,11 @@ check_os() {
         log "ERROR" "此脚本仅支持 Ubuntu 系统"
         exit 1
     fi
+    # 版本兼容性预警: 仅在 22.04/24.04 上充分测试
+    case "${VERSION_ID:-}" in
+        22.04|24.04) ;;
+        *) log "WARN" "此脚本仅在 Ubuntu 22.04/24.04 LTS 上测试，当前: ${VERSION_ID:-unknown}，部分功能可能不兼容" ;;
+    esac
     log "INFO" "检测到 $PRETTY_NAME (内核 $(uname -r))"
 }
 
@@ -333,6 +338,24 @@ EOF
 tune_memory() {
     step_banner "A3" "内存策略优化"
 
+    local total_mem_kb
+    total_mem_kb=$(awk '/MemTotal/{print $2}' /proc/meminfo)
+    local total_mem_mb=$(( total_mem_kb / 1024 ))
+
+    # MIN_FREE_KBYTES 动态计算: 内存的 ~1.5%, 范围 16384-262144
+    local min_free="$MIN_FREE_KBYTES"
+    if [[ "$min_free" == "auto" ]]; then
+        min_free=$(( total_mem_kb * 15 / 1000 ))
+        [[ $min_free -lt 16384 ]] && min_free=16384
+        [[ $min_free -gt 262144 ]] && min_free=262144
+    fi
+
+    # overcommit_memory: 内存 >= 4GB 或检测到 Redis 时启用, 否则保守值 0
+    local overcommit=0
+    if [[ $total_mem_mb -ge 4096 ]] || [[ -n "${REDIS_CONTAINER:-}" ]]; then
+        overcommit=1
+    fi
+
     local sysctl_mem="/etc/sysctl.d/99-web-optimize-mem.conf"
     backup_file "$sysctl_mem"
     cat > "$sysctl_mem" << EOF
@@ -341,17 +364,17 @@ vm.swappiness = ${SWAPPINESS}
 vm.dirty_ratio = ${DIRTY_RATIO}
 vm.dirty_background_ratio = ${DIRTY_BG_RATIO}
 vm.vfs_cache_pressure = ${VFS_CACHE_PRESSURE}
-vm.min_free_kbytes = ${MIN_FREE_KBYTES}
+vm.min_free_kbytes = ${min_free}
 # overcommit_memory=1: Redis 推荐值，允许内核过度分配内存
-# 注意: 在内存紧张的系统上可能加剧 OOM 风险
-vm.overcommit_memory = 1
+# 仅在内存 >= 4GB 或检测到 Redis 容器时启用 (小内存设为 0 避免 OOM)
+vm.overcommit_memory = ${overcommit}
 EOF
 
     if [[ "$DRY_RUN" != "yes" ]]; then
         sysctl --system >/dev/null 2>&1
-        log "INFO" "内存策略: swappiness=$SWAPPINESS, dirty_ratio=$DIRTY_RATIO"
+        log "INFO" "内存策略: swappiness=$SWAPPINESS, dirty_ratio=$DIRTY_RATIO, min_free_kbytes=$min_free, overcommit=$overcommit"
     else
-        log "INFO" "[DRY-RUN] 已生成内存策略配置"
+        log "INFO" "[DRY-RUN] 已生成内存策略配置 (min_free_kbytes=$min_free, overcommit=$overcommit)"
     fi
 
     echo "rm -f '$sysctl_mem' && sysctl --system >/dev/null 2>&1 && echo '已移除内存策略'" >> "$ROLLBACK_SCRIPT"

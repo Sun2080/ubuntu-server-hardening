@@ -1,6 +1,6 @@
 # Ubuntu Server Hardening & Web Optimization
 
-> **v3.6** | [CHANGELOG](CHANGELOG.md)
+> **v3.7** | [CHANGELOG](CHANGELOG.md)
 
 一套面向 **Ubuntu 22.04 / 24.04 LTS** 的服务器安全加固与 Web 性能优化脚本。
 
