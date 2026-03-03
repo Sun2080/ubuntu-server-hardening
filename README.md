@@ -46,6 +46,11 @@ sudo bash init-mirror.sh --auto
 # 3. 安装 1Panel（会自动装 Docker）
 curl -sSL https://resource.fit2cloud.com/1panel/package/quick_start.sh \
   -o quick_start.sh && sudo bash quick_start.sh
+
+# 4. 补配 Docker Hub 镜像加速（1Panel 装好 Docker 后再跑一次）
+#    APT 源已配好会自动跳过，仅补上 Docker 加速 + 跳过系统更新
+cd ~/ubuntu-server-hardening
+SKIP_UPGRADE=yes sudo bash init-mirror.sh --auto
 ```
 
 登录 1Panel 面板，在「应用商店」中**依次**安装：
@@ -67,7 +72,7 @@ curl -sSL https://resource.fit2cloud.com/1panel/package/quick_start.sh \
 > ❗ **前置要求**：先在云控制台安全组放行新 SSH 端口（默认 2222）
 
 ```bash
-# 4. 执行安全加固
+# 5. 执行安全加固
 cd ~/ubuntu-server-hardening
 
 # 开发/调试期间用 dev 模式（兼容 VSCode Remote-SSH）：
@@ -78,17 +83,17 @@ SSH_MODE=dev sudo bash sec-harden.sh --auto
 ```
 
 ```bash
-# 5. ❗ 关键：用新端口测试 SSH 连接（不要断开当前会话！）
+# 6. ❗ 关键：用新端口测试 SSH 连接（不要断开当前会话！）
 ssh -p 2222 user@你的IP
 ```
 
 ### 阶段四：性能优化
 
 ```bash
-# 6. 确认 SSH 新端口可连后，执行性能优化
+# 7. 确认 SSH 新端口可连后，执行性能优化
 sudo bash web-optimize.sh --auto
 
-# 7. 审查后一键应用 Docker 容器配置
+# 8. 审查后一键应用 Docker 容器配置
 sudo bash /opt/server-tuning/apply-docker-configs.sh
 ```
 
@@ -101,17 +106,19 @@ sudo bash /opt/server-tuning/apply-docker-configs.sh
   │
   ├─ ② 安装 1Panel              自动装 Docker
   │
-  ├─ ③ 1Panel 装 Web 栈         OpenResty → MySQL → PHP → Redis
+  ├─ ③ init-mirror.sh (再跑)   补配 Docker Hub 镜像加速
   │
-  ├─ ④ 部署网站                 建站 + 域名 + SSL
+  ├─ ④ 1Panel 装 Web 栈         OpenResty → MySQL → PHP → Redis
   │
-  ├─ ⑤ sec-harden.sh           安全加固（检测 1Panel 端口 + Docker）
+  ├─ ⑤ 部署网站                 建站 + 域名 + SSL
   │
-  ├─ ⑥ 验证新 SSH 端口          ⚠ 千万别断当前会话
+  ├─ ⑥ sec-harden.sh           安全加固（检测 1Panel 端口 + Docker）
   │
-  ├─ ⑦ web-optimize.sh         性能优化（检测容器 + 生成配置）
+  ├─ ⑦ 验证新 SSH 端口          ⚠ 千万别断当前会话
   │
-  └─ ⑧ apply-docker-configs.sh 应用容器优化配置
+  ├─ ⑧ web-optimize.sh         性能优化（检测容器 + 生成配置）
+  │
+  └─ ⑨ apply-docker-configs.sh 应用容器优化配置
 ```
 
 ### 云安全组提前放行
