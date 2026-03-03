@@ -180,7 +180,7 @@ confirm_dangerous() {
         return 0
     fi
     echo "" | tee -a "$LOG_FILE"
-    printf '  %b⚠ 危险操作: %s%b\n' "${YELLOW}" "${NC}" "$msg" | tee -a "$LOG_FILE"
+    printf '  %b⚠ 危险操作:%b %s\n' "${YELLOW}" "${NC}" "$msg" | tee -a "$LOG_FILE"
     printf '  %b确认继续? [y/N]: %b' "${BOLD}" "${NC}"
     read -r answer </dev/tty 2>/dev/null || answer="n"
     case "$answer" in
@@ -572,10 +572,14 @@ EOF
 
     log "INFO" "已生成 nginx.conf (workers=auto, connections=$NGINX_WORKER_CONNECTIONS)"
 
-    # ─── C11: 安全头配置 ──────────────────────────────────────────────────
-    cat > "$nginx_dir/security-headers.conf" << 'EOF'
+    # ─── C11: 安全头配置 (snippet, 需在 server 块中 include) ─────────────
+    # ⚠ 这些文件含 location/add_header 指令，不能放 conf.d/ (被 http 层 include)
+    #   应放到 snippets/ 目录，在各 server 块中手动引用
+    local snippets_dir="$nginx_dir/snippets"
+    mkdir -p "$snippets_dir"
+    cat > "$snippets_dir/security-headers.conf" << 'EOF'
 # === web-optimize.sh 安全头配置 ===
-# 在 server 块中 include 此文件
+# 用法: 在 server 块中添加 include snippets/security-headers.conf;
 
 # 防止点击劫持
 add_header X-Frame-Options "SAMEORIGIN" always;
@@ -600,9 +604,9 @@ add_header Content-Security-Policy "frame-ancestors 'self';" always;
 EOF
 
     # ─── C12: 敏感文件拦截 ────────────────────────────────────────────────
-    cat > "$nginx_dir/block-sensitive.conf" << 'EOF'
+    cat > "$snippets_dir/block-sensitive.conf" << 'EOF'
 # === web-optimize.sh 敏感文件拦截 ===
-# 在 server 块中 include 此文件
+# 用法: 在 server 块中添加 include snippets/block-sensitive.conf;
 
 # 禁止访问隐藏文件和敏感文件
 location ~ /\.(git|env|svn|htaccess|htpasswd|DS_Store) {
@@ -640,9 +644,9 @@ location = /xmlrpc.php {
 EOF
 
     # ─── 静态文件缓存配置 ─────────────────────────────────────────────────
-    cat > "$nginx_dir/static-cache.conf" << 'EOF'
+    cat > "$snippets_dir/static-cache.conf" << 'EOF'
 # === web-optimize.sh 静态文件缓存 ===
-# 在 server 块中 include 此文件
+# 用法: 在 server 块中添加 include snippets/static-cache.conf;
 
 # 图片
 location ~* \.(jpg|jpeg|png|gif|ico|webp|avif|svg)$ {
@@ -675,7 +679,7 @@ location ~* \.(mp4|webm|mp3|ogg)$ {
 EOF
 
     # ─── 限流示例 ─────────────────────────────────────────────────────────
-    cat > "$nginx_dir/rate-limit-example.conf" << 'EOF'
+    cat > "$snippets_dir/rate-limit-example.conf" << 'EOF'
 # === web-optimize.sh 限流示例 ===
 # 在 location 块中引用
 
@@ -1075,28 +1079,34 @@ EOF
             cat >> "$APPLY_SCRIPT" << EOF
 cp -a "$nginx_host_conf" "\$BACKUP_DIR/nginx.conf.bak" 2>/dev/null || true
 
-# 复制安全头和敏感文件拦截配置到 conf.d主机目录
-# 注意: 主配置 nginx.conf 由 1Panel 管理，不直接覆盖
-cp "\$OUTPUT_DIR/nginx/security-headers.conf" "$nginx_host_confd/security-headers.conf" 2>/dev/null || true
-cp "\$OUTPUT_DIR/nginx/block-sensitive.conf" "$nginx_host_confd/block-sensitive.conf" 2>/dev/null || true
-log "已复制安全头和敏感文件拦截配置到 $nginx_host_confd"
+# 复制 snippets 到宿主机 conf 目录（不放 conf.d，避免被 http 层 include 引入）
+# ⚠ 这些文件含 location/add_header，只能在 server 块中引用
+mkdir -p "${nginx_host_confd%/conf.d}/snippets" 2>/dev/null || true
+cp -r "\$OUTPUT_DIR/nginx/snippets/"* "${nginx_host_confd%/conf.d}/snippets/" 2>/dev/null || true
+log "已复制 snippets 到 ${nginx_host_confd%/conf.d}/snippets/"
+log "⚠ 请在各站点 server 块中添加: include snippets/security-headers.conf; 和 include snippets/block-sensitive.conf;"
 
 # 重载 OpenResty
-docker exec "$NGINX_CONTAINER" nginx -t 2>&1 && docker exec "$NGINX_CONTAINER" nginx -s reload && log "OpenResty 配置已重载" || err "OpenResty 配置验证失败"
+docker exec "$NGINX_CONTAINER" nginx -t 2>&1 && docker exec "$NGINX_CONTAINER" nginx -s reload && log "OpenResty 配置已重载" || warn "OpenResty 配置未变化，跳过重载"
 EOF
         else
             cat >> "$APPLY_SCRIPT" << EOF
 backup_from_container "$NGINX_CONTAINER" "/usr/local/openresty/nginx/conf/nginx.conf" "nginx.conf"
 
-docker exec "$NGINX_CONTAINER" mkdir -p /var/cache/nginx/fastcgi /var/cache/nginx/fastcgi_temp 2>/dev/null || true
-docker cp "\$OUTPUT_DIR/nginx/security-headers.conf" "$NGINX_CONTAINER:/usr/local/openresty/nginx/conf/conf.d/security-headers.conf"
-docker cp "\$OUTPUT_DIR/nginx/block-sensitive.conf" "$NGINX_CONTAINER:/usr/local/openresty/nginx/conf/conf.d/block-sensitive.conf"
+# 复制 snippets 到容器（不放 conf.d，避免被 http 层 include 引入）
+# ⚠ 这些文件含 location/add_header，只能在 server 块中引用
+docker exec "$NGINX_CONTAINER" mkdir -p /usr/local/openresty/nginx/conf/snippets /var/cache/nginx/fastcgi /var/cache/nginx/fastcgi_temp 2>/dev/null || true
+for _f in \$OUTPUT_DIR/nginx/snippets/*.conf; do
+    docker cp "\$_f" "$NGINX_CONTAINER:/usr/local/openresty/nginx/conf/snippets/" 2>/dev/null || true
+done
+log "已复制 snippets 到容器 $NGINX_CONTAINER:/usr/local/openresty/nginx/conf/snippets/"
+log "⚠ 请在各站点 server 块中添加: include snippets/security-headers.conf; 和 include snippets/block-sensitive.conf;"
 
 if docker exec "$NGINX_CONTAINER" nginx -t 2>&1; then
     docker exec "$NGINX_CONTAINER" nginx -s reload
     log "Nginx 配置已应用并重载"
 else
-    err "Nginx 配置验证失败，请检查配置文件"
+    warn "Nginx 配置未变化，跳过重载"
 fi
 EOF
         fi
@@ -1227,6 +1237,18 @@ EOF
         local redis_actual_mem
         redis_actual_mem=$(awk '/^maxmemory /{print $2}' "$OUTPUT_DIR/redis/custom.conf" 2>/dev/null || echo "256mb")
 
+        # 自动检测 Redis 密码 (1Panel 通过 --requirepass 传入; 也检测配置文件)
+        local redis_pass=""
+        redis_pass=$(docker inspect "$REDIS_CONTAINER" --format '{{range .Config.Cmd}}{{.}} {{end}}' 2>/dev/null | grep -oP '(?<=--requirepass\s)\S+' || true)
+        if [[ -z "$redis_pass" ]]; then
+            redis_pass=$(docker exec "$REDIS_CONTAINER" grep -E '^\s*requirepass\s' /etc/redis/redis.conf 2>/dev/null | awk '{print $2}' || true)
+        fi
+        local redis_auth_flag=""
+        if [[ -n "$redis_pass" ]]; then
+            redis_auth_flag="-a '$redis_pass' --no-auth-warning"
+            log "INFO" "已检测到 Redis 认证密码"
+        fi
+
         cat >> "$APPLY_SCRIPT" << EOF
 
 # ═══ Redis: $REDIS_CONTAINER ═══
@@ -1237,12 +1259,12 @@ backup_from_container "$REDIS_CONTAINER" "/usr/local/etc/redis/redis.conf" "redi
 backup_from_container "$REDIS_CONTAINER" "/etc/redis/redis.conf" "redis.conf" 2>/dev/null || true
 
 # 尝试通过 CONFIG SET 在线应用（不需要重启）
-docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET maxmemory "${redis_actual_mem}" 2>/dev/null || true
-docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET maxmemory-policy "${REDIS_POLICY}" 2>/dev/null || true
-docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET maxclients ${REDIS_MAXCLIENTS} 2>/dev/null || true
-docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET tcp-keepalive 300 2>/dev/null || true
-docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET slowlog-log-slower-than 10000 2>/dev/null || true
-docker exec "$REDIS_CONTAINER" redis-cli CONFIG REWRITE 2>/dev/null || true
+docker exec "$REDIS_CONTAINER" redis-cli $redis_auth_flag CONFIG SET maxmemory "${redis_actual_mem}" 2>/dev/null || true
+docker exec "$REDIS_CONTAINER" redis-cli $redis_auth_flag CONFIG SET maxmemory-policy "${REDIS_POLICY}" 2>/dev/null || true
+docker exec "$REDIS_CONTAINER" redis-cli $redis_auth_flag CONFIG SET maxclients ${REDIS_MAXCLIENTS} 2>/dev/null || true
+docker exec "$REDIS_CONTAINER" redis-cli $redis_auth_flag CONFIG SET tcp-keepalive 300 2>/dev/null || true
+docker exec "$REDIS_CONTAINER" redis-cli $redis_auth_flag CONFIG SET slowlog-log-slower-than 10000 2>/dev/null || true
+docker exec "$REDIS_CONTAINER" redis-cli $redis_auth_flag CONFIG REWRITE 2>/dev/null || true
 
 log "Redis 配置已在线应用 (maxmemory=${redis_actual_mem})"
 EOF
