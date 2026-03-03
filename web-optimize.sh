@@ -1480,7 +1480,7 @@ log "备份目录: $BACKUP_DIR"
 log "如需回滚，请从备份目录恢复原始配置文件"
 FOOTER
 
-    chmod 755 "$APPLY_SCRIPT"
+    chmod 700 "$APPLY_SCRIPT"
     log "INFO" "已生成配置应用脚本: $APPLY_SCRIPT"
 }
 
