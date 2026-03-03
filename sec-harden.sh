@@ -257,7 +257,7 @@ harden_ssh() {
     local ssh_config=""
     ssh_config+="# === sec-harden.sh 安全加固配置 $(date +%F) ===\n"
     ssh_config+="Port ${SSH_PORT}\n"
-    ssh_config+="AddressFamily inet\n"
+    ssh_config+="AddressFamily any\n"
     ssh_config+="\n# 认证\n"
 
     # ⚠ 防锁定: 检查是否存在有 sudo 权限的非 root 用户
@@ -365,14 +365,22 @@ harden_ssh() {
         mkdir -p "$socket_override"
         # 备份现有 override
         [[ -f "$socket_override/override.conf" ]] && backup_file "$socket_override/override.conf"
+        # ⚠ 防锁定: ListenStream 必须显式绑定 0.0.0.0，否则 systemd 默认绑定 [::] (IPv6)
+        #   而 sshd_config AddressFamily inet 仅接受 IPv4，两者冲突会导致完全无法连接
+        # ⚠ 过渡期: 同时保留原端口 22，避免端口切换瞬间丢失连接
         cat > "$socket_override/override.conf" << EOF
 # sec-harden.sh: 同步 SSH 端口到 ssh.socket
 [Socket]
 ListenStream=
-ListenStream=${SSH_PORT}
+ListenStream=0.0.0.0:${SSH_PORT}
 EOF
+        # 过渡期: 如果目标端口不是 22，同时保留 22 端口监听
+        if [[ "$SSH_PORT" != "22" ]]; then
+            sed -i '/^\[Socket\]$/a ListenStream=0.0.0.0:22' "$socket_override/override.conf"
+            log "INFO" "已保留端口 22 用于过渡 (建议稳定后手动移除)"
+        fi
         systemctl daemon-reload
-        log "INFO" "已更新 ssh.socket 端口为 $SSH_PORT (systemd socket activation)"
+        log "INFO" "已更新 ssh.socket 端口为 $SSH_PORT (systemd socket activation, 显式 IPv4 绑定)"
         # 回滚
         echo "rm -f '$socket_override/override.conf' && systemctl daemon-reload && systemctl restart ssh.socket 2>/dev/null || true" >> "$ROLLBACK_SCRIPT"
     fi
@@ -402,9 +410,19 @@ EOF
     fi
 
     # 关键安全检查: 确认 SSH 确实在新端口监听，失败则自动回滚
-    sleep 1
-    if ss -tlnp | grep -q ":${SSH_PORT} "; then
-        log "INFO" "✓ SSH 端口 $SSH_PORT 监听已确认"
+    sleep 2
+    local listen_addrs
+    listen_addrs=$(ss -tlnp 2>/dev/null | grep ":${SSH_PORT} " || true)
+    if [[ -n "$listen_addrs" ]]; then
+        # 额外检查: 若仅 IPv6 ([::]) 监听但未监听 IPv4 (0.0.0.0) 则警告
+        if echo "$listen_addrs" | grep -q '0\.0\.0\.0' || echo "$listen_addrs" | grep -q '\*:'; then
+            log "INFO" "✓ SSH 端口 $SSH_PORT IPv4 监听已确认"
+        elif echo "$listen_addrs" | grep -q '\[::\]'; then
+            log "WARN" "⚠ SSH 端口 $SSH_PORT 仅在 IPv6 监听，IPv4 客户端可能无法连接！"
+            log "WARN" "  请检查 ssh.socket override 和 AddressFamily 设置"
+        else
+            log "INFO" "✓ SSH 端口 $SSH_PORT 监听已确认"
+        fi
     else
         log "ERROR" "✗ SSH 端口 $SSH_PORT 未监听！正在自动回滚配置..."
         cp "${BACKUP_DIR}/etc/ssh/sshd_config" "$sshd_conf" 2>/dev/null || true
