@@ -1249,6 +1249,13 @@ EOF
             log "INFO" "已检测到 Redis 认证密码"
         fi
 
+        # 检测宿主机上的 Redis 配置文件路径 (用于 bind-mount 场景的持久化)
+        local redis_host_conf=""
+        redis_host_conf=$(docker inspect "$REDIS_CONTAINER" --format='{{range .Mounts}}{{if eq .Destination "/etc/redis/redis.conf"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)
+        if [[ -z "$redis_host_conf" ]]; then
+            redis_host_conf=$(docker inspect "$REDIS_CONTAINER" --format='{{range .Mounts}}{{if eq .Destination "/usr/local/etc/redis/redis.conf"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)
+        fi
+
         cat >> "$APPLY_SCRIPT" << EOF
 
 # ═══ Redis: $REDIS_CONTAINER ═══
@@ -1264,7 +1271,29 @@ docker exec "$REDIS_CONTAINER" redis-cli $redis_auth_flag CONFIG SET maxmemory-p
 docker exec "$REDIS_CONTAINER" redis-cli $redis_auth_flag CONFIG SET maxclients ${REDIS_MAXCLIENTS} 2>/dev/null || true
 docker exec "$REDIS_CONTAINER" redis-cli $redis_auth_flag CONFIG SET tcp-keepalive 300 2>/dev/null || true
 docker exec "$REDIS_CONTAINER" redis-cli $redis_auth_flag CONFIG SET slowlog-log-slower-than 10000 2>/dev/null || true
-docker exec "$REDIS_CONTAINER" redis-cli $redis_auth_flag CONFIG REWRITE 2>/dev/null || true
+
+# 持久化配置到磁盘
+# CONFIG REWRITE 在 Docker bind-mount 单文件场景下因 rename() 返回 EBUSY 而失败
+# 直接修改宿主机配置文件持久化 (使用 cat > 保持 inode 不变, 避免破坏 bind mount)
+REDIS_HOST_CONF="${redis_host_conf}"
+if [[ -n "\$REDIS_HOST_CONF" ]] && [[ -f "\$REDIS_HOST_CONF" ]]; then
+    _redis_tmpf=\$(mktemp)
+    cp "\$REDIS_HOST_CONF" "\$_redis_tmpf"
+    for param in "maxmemory ${redis_actual_mem}" "maxmemory-policy ${REDIS_POLICY}" "maxclients ${REDIS_MAXCLIENTS}" "tcp-keepalive 300" "slowlog-log-slower-than 10000"; do
+        key=\$(echo "\$param" | cut -d' ' -f1)
+        if grep -qE "^[[:space:]]*\${key}[[:space:]]" "\$_redis_tmpf" 2>/dev/null; then
+            sed -i "s|^[[:space:]]*\${key}[[:space:]].*|\$param|" "\$_redis_tmpf"
+        else
+            echo "\$param" >> "\$_redis_tmpf"
+        fi
+    done
+    cat "\$_redis_tmpf" > "\$REDIS_HOST_CONF"
+    rm -f "\$_redis_tmpf"
+    log "Redis 配置已通过宿主机文件持久化: \$REDIS_HOST_CONF"
+else
+    docker exec "$REDIS_CONTAINER" redis-cli $redis_auth_flag CONFIG REWRITE 2>/dev/null || \
+        log "WARN: Redis CONFIG REWRITE 失败，配置仅在内存中生效，重启容器后可能丢失"
+fi
 
 log "Redis 配置已在线应用 (maxmemory=${redis_actual_mem})"
 EOF
