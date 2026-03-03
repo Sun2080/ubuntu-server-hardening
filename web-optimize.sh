@@ -738,10 +738,7 @@ generate_php_config() {
 ; 系统内存: ${total_mem}MB 总量, ${avail_mem}MB 可用
 
 [www]
-user = www-data
-group = www-data
-
-listen = 0.0.0.0:9000
+; user/group/listen 保持容器原有配置不覆盖
 
 ; 进程管理
 pm = ${PHP_PM_MODE}
@@ -817,8 +814,8 @@ post_max_size = ${PHP_UPLOAD_MAX}
 upload_max_filesize = ${PHP_UPLOAD_MAX}
 max_file_uploads = 20
 
-; 路径安全
-open_basedir = /var/www/:/tmp/:/proc/
+; 路径安全 (包含常见 Web 根目录 + 1Panel 默认路径)
+open_basedir = /var/www/:/www/:/opt/1panel/:/tmp/:/proc/
 allow_url_fopen = On
 allow_url_include = Off
 
@@ -1033,9 +1030,9 @@ set -euo pipefail
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
-log() { printf "${GREEN}[%s] %s${NC}\n" "$(date '+%H:%M:%S')" "$*"; }
-warn() { printf "${YELLOW}[%s] ⚠ %s${NC}\n" "$(date '+%H:%M:%S')" "$*"; }
-err() { printf "${RED}[%s] ✗ %s${NC}\n" "$(date '+%H:%M:%S')" "$*"; }
+log() { printf '%b[%s] %s%b\n' "$GREEN" "$(date '+%H:%M:%S')" "$*" "$NC"; }
+warn() { printf '%b[%s] ⚠ %s%b\n' "$YELLOW" "$(date '+%H:%M:%S')" "$*" "$NC"; }
+err() { printf '%b[%s] ✗ %s%b\n' "$RED" "$(date '+%H:%M:%S')" "$*" "$NC"; }
 
 OUTPUT_DIR="/opt/server-tuning"
 BACKUP_DIR="/root/.web-optimize-backup/docker-apply-$(date +%Y%m%d_%H%M%S)"
@@ -1223,9 +1220,9 @@ _merge_php_ini() {
         # 转义 key 中的正则特殊字符 (如 . [] 等)
         local ekey
         ekey=$(printf '%s' "$key" | sed 's/[].[\^$*+?(){}|]/\\&/g')
-        # 转义 value 中的 sed 替换特殊字符 (& 和 \)
+        # 转义 value 中的 sed 替换特殊字符 (& \ |)
         local svalue
-        svalue=$(printf '%s' "$value" | sed 's/[&\\]/\\&/g')
+        svalue=$(printf '%s' "$value" | sed 's/[&\\|]/\\&/g')
 
         if grep -qE "^[[:space:]]*${ekey}[[:space:]]*=" "$_tmpf" 2>/dev/null; then
             sed -i "s|^[[:space:]]*${ekey}[[:space:]]*=.*|${key} = ${svalue}|" "$_tmpf"
@@ -1284,10 +1281,14 @@ EOF
     if [[ -n "$MARIADB_CONTAINER" ]]; then
         # 通过 Docker inspect 自动检测宿主机挂载路径
         local mariadb_host_conf=""
-        local _mc
+        local _mc=""
+        local _mc_is_real_mount=""  # conf.d 目录是否为 Docker mount (vs 仅宿主机创建)
         _mc=$(detect_host_mount "$MARIADB_CONTAINER" "/etc/mysql/conf.d")
         [[ -z "$_mc" ]] && _mc=$(detect_host_mount "$MARIADB_CONTAINER" "/etc/mysql/mariadb.conf.d")
         [[ -z "$_mc" ]] && _mc=$(detect_host_mount "$MARIADB_CONTAINER" "/etc/my.cnf.d")
+        if [[ -n "$_mc" ]]; then
+            _mc_is_real_mount="yes"
+        fi
         # 检测整个 /etc/mysql 挂载
         if [[ -z "$_mc" ]]; then
             local _mroot
@@ -1296,6 +1297,7 @@ EOF
                 mariadb_host_conf="$_mroot/my.cnf"
                 mkdir -p "$_mroot/conf.d" 2>/dev/null
                 _mc="$_mroot/conf.d"
+                _mc_is_real_mount="yes"  # 父目录挂载, conf.d 同样在容器内可见
             fi
         fi
         # 1Panel 单文件挂载: my.cnf 直接 bind-mount
@@ -1305,10 +1307,7 @@ EOF
             [[ -z "$_mf" ]] && _mf=$(detect_host_mount "$MARIADB_CONTAINER" "/etc/my.cnf")
             if [[ -n "$_mf" && -f "$_mf" ]]; then
                 mariadb_host_conf="$_mf"
-                local _mdir
-                _mdir=$(dirname "$_mf")
-                mkdir -p "$_mdir/conf.d" 2>/dev/null
-                _mc="$_mdir/conf.d"
+                # 注意: 不设 _mc_is_real_mount, 因为宿主机 conf.d 并未映射到容器
             fi
         fi
         if [[ -n "$_mc" ]]; then
@@ -1322,23 +1321,54 @@ EOF
 log "应用 MariaDB 配置到容器: $MARIADB_CONTAINER"
 EOF
         if [[ -n "$mariadb_host_conf" ]]; then
-            local _mc_confdir
-            _mc_confdir=$(dirname "$mariadb_host_conf")/conf.d
+            # 检测 conf.d 是否也挂载到容器内 (非 1Panel 单文件场景)
+            local _mc_has_confd_mount=""
+            if [[ -n "$_mc" && "$_mc_is_real_mount" == "yes" ]]; then
+                # _mc 来自真实 Docker mount (conf.d 或父目录挂载), 容器内可见
+                _mc_has_confd_mount="yes"
+            fi
             cat >> "$APPLY_SCRIPT" << EOF
 
-# 宿主机挂载的 MariaDB: 将优化配置以 conf.d 方式引入
+# 宿主机挂载的 MariaDB 配置
 cp -a "$mariadb_host_conf" "\$BACKUP_DIR/mariadb-my.cnf.bak" 2>/dev/null || true
+EOF
+            if [[ -n "$_mc_has_confd_mount" ]]; then
+                # conf.d 目录有挂载: 直接放文件到宿主机 conf.d + includedir
+                cat >> "$APPLY_SCRIPT" << EOF
 
-# 创建 conf.d 并放入优化配置
-mkdir -p "$_mc_confdir"
-cp "\$OUTPUT_DIR/mariadb/custom.cnf" "$_mc_confdir/zz-optimize.cnf"
-
-# 检查 my.cnf 是否已包含 includedir
+# conf.d 目录已挂载到容器, 直接写入宿主机
+mkdir -p "$_mc"
+cp "\$OUTPUT_DIR/mariadb/custom.cnf" "$_mc/zz-optimize.cnf"
 if ! grep -q 'includedir.*conf.d' "$mariadb_host_conf" 2>/dev/null; then
     echo '' >> "$mariadb_host_conf"
     echo '!includedir /etc/mysql/conf.d/' >> "$mariadb_host_conf"
     log "已添加 includedir 到 my.cnf"
 fi
+EOF
+            else
+                # 1Panel 单文件挂载: conf.d 未映射, 用 docker cp 放入容器内
+                cat >> "$APPLY_SCRIPT" << EOF
+
+# 1Panel 单文件挂载: conf.d 未映射到宿主机, 通过 docker cp 写入容器
+_mariadb_confd=\$(docker exec "$MARIADB_CONTAINER" sh -c 'find /etc/mysql/conf.d /etc/mysql/mariadb.conf.d /etc/my.cnf.d -type d 2>/dev/null | head -1' 2>/dev/null)
+[[ -z "\$_mariadb_confd" ]] && _mariadb_confd="/etc/mysql/conf.d"
+docker exec "$MARIADB_CONTAINER" mkdir -p "\$_mariadb_confd" 2>/dev/null || true
+docker cp "\$OUTPUT_DIR/mariadb/custom.cnf" "$MARIADB_CONTAINER:\$_mariadb_confd/zz-optimize.cnf"
+if ! grep -q 'includedir' "$mariadb_host_conf" 2>/dev/null; then
+    _tmpf=\$(mktemp)
+    cp "$mariadb_host_conf" "\$_tmpf"
+    echo '' >> "\$_tmpf"
+    echo "!includedir \$_mariadb_confd/" >> "\$_tmpf"
+    cat "\$_tmpf" > "$mariadb_host_conf"
+    rm -f "\$_tmpf"
+    log "已添加 includedir 到 my.cnf (inode 安全写入)"
+fi
+EOF
+            fi
+            cat >> "$APPLY_SCRIPT" << EOF
+
+docker exec "$MARIADB_CONTAINER" mkdir -p /var/log/mysql 2>/dev/null || true
+docker exec "$MARIADB_CONTAINER" chown mysql:mysql /var/log/mysql 2>/dev/null || true
 
 # 重启 MariaDB 容器
 docker restart "$MARIADB_CONTAINER"
