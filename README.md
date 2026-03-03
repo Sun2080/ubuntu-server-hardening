@@ -1,6 +1,6 @@
 # Ubuntu Server Hardening & Web Optimization
 
-> **v3.3** | [CHANGELOG](CHANGELOG.md)
+> **v3.4** | [CHANGELOG](CHANGELOG.md)
 
 一套面向 **Ubuntu 22.04 / 24.04 LTS** 的服务器安全加固与 Web 性能优化脚本。
 
@@ -136,26 +136,20 @@ sudo bash /opt/server-tuning/apply-docker-configs.sh
 
 ## 快速开始
 
-### 一键下载（私有仓库）
-
-先在 GitHub 创建 Personal Access Token (classic)，勾选 `repo` 权限，然后：
+### 一键下载
 
 ```bash
-# 设置你的 Token（只需执行一次）
-TOKEN="ghp_你的Token"
+# 方式一：Git 克隆（推荐）
+git clone https://github.com/Sun2080/ubuntu-server-hardening.git
+cd ubuntu-server-hardening
 
-# 下载脚本
+# 方式二：仅下载脚本（无需安装 Git）
 for f in init-mirror.sh sec-harden.sh web-optimize.sh; do
-  curl -fsSL -H "Authorization: token $TOKEN" \
+  curl -fsSL \
     "https://raw.githubusercontent.com/Sun2080/ubuntu-server-hardening/main/$f" \
     -o "$f"
 done
 ```
-
-> **快捷方式**：如果目标服务器已安装 `gh` CLI 并登录，也可以直接克隆：
-> ```bash
-> gh repo clone Sun2080/ubuntu-server-hardening && cd ubuntu-server-hardening
-> ```
 
 ### 用法
 
