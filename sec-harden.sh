@@ -1308,7 +1308,6 @@ setup_aide() {
     log "INFO" "正在初始化 AIDE 数据库（可能需要几分钟…）"
     local aide_init_ok=true
     yes | timeout 300 aideinit >/dev/null 2>&1 || timeout 300 aide --init >/dev/null 2>&1 || {
-        log "WARN" "AIDE 初始化超时或失败，可稍后手动运行: aideinit"
         aide_init_ok=false
     }
 
@@ -1334,7 +1333,8 @@ AIDECRON
     if [[ "$aide_init_ok" == true ]]; then
         log "INFO" "AIDE 已初始化，每日自动检查已配置"
     else
-        log "WARN" "AIDE 数据库未就绪，每日检查已配置但首次运行可能失败"
+        log "WARN" "AIDE 初始化超时或失败，可稍后手动运行: aideinit"
+        log "WARN" "每日检查已配置但首次运行可能失败"
     fi
 
     echo "rm -f '$aide_cron' && echo '已移除 AIDE 定时检查'" >> "$ROLLBACK_SCRIPT"
