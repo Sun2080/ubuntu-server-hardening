@@ -6,8 +6,7 @@
 
 ## [3.7] — 2026-03-03
 
-### 修复
-- **版本兼容性预警**：`check_os()` 仅检查 `ID == ubuntu` 但未校验 `VERSION_ID`，在 20.04/25.04 等未测试版本上无任何提示。三个脚本 + `lib/common.sh` 均添加 `VERSION_ID` 检测，非 22.04/24.04 时输出 WARN 级别警告
+### 修复- **`overcommit_memory` 条件判断时序 bug**：`tune_memory()` 在 `detect_containers()` 之前执行，导致 `REDIS_CONTAINER` 始终为空，小内存 + Redis 环境下 `overcommit_memory` 错误地保持为 `0`。将容器检测提前到内存策略之前- **版本兼容性预警**：`check_os()` 仅检查 `ID == ubuntu` 但未校验 `VERSION_ID`，在 20.04/25.04 等未测试版本上无任何提示。三个脚本 + `lib/common.sh` 均添加 `VERSION_ID` 检测，非 22.04/24.04 时输出 WARN 级别警告
 - **`vm.overcommit_memory` OOM 风险**：此前无条件设为 `1`，在 1-2GB 小内存机器上极易触发 OOM。现仅在内存 ≥ 4GB 或检测到 Redis 容器时启用，小内存机器保持默认 `0`
 - **`MIN_FREE_KBYTES` 固定 65536**：对 1GB 机器偏大 (~6%)，对 32GB+ 机器又太小。改为按总内存 ~1.5% 动态计算，范围 16384–262144 KB（仍可通过环境变量覆盖）
 

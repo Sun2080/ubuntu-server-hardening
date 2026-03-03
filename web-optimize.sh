@@ -1789,11 +1789,12 @@ main() {
     # A: 系统级优化
     tune_kernel_network
     tune_file_descriptors
+
+    # B: Docker 容器检测（提前于 tune_memory，因为内存策略需要 REDIS_CONTAINER 判断 overcommit）
+    detect_containers
+
     tune_memory
     disable_unnecessary_services
-
-    # B: Docker 容器检测
-    detect_containers
 
     # C-F: 生成服务配置（无论是否检测到容器都生成模板）
     generate_nginx_config
