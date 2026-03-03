@@ -9,7 +9,7 @@
 #    SSH_MODE=dev sudo bash sec-harden.sh --auto  # 开发模式
 ###############################################################################
 set -Euo pipefail
-SCRIPT_VERSION="3.2"
+SCRIPT_VERSION="3.3"
 
 # ─── ERR trap ────────────────────────────────────────────────────────────────
 trap '_err_handler $LINENO "$BASH_COMMAND"' ERR
@@ -1550,7 +1550,7 @@ show_current_status() {
 
     # Docker 容器
     local docker_count
-    docker_count=$(docker ps -q 2>/dev/null | wc -l)
+    docker_count=$( { docker ps -q 2>/dev/null || true; } | wc -l )
     printf "  Docker 容器: ${YELLOW}%s 运行中${NC}\n" "$docker_count"
 
     # 1Panel

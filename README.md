@@ -1,6 +1,6 @@
 # Ubuntu Server Hardening & Web Optimization
 
-> **v3.2** | [CHANGELOG](CHANGELOG.md)
+> **v3.3** | [CHANGELOG](CHANGELOG.md)
 
 一套面向 **Ubuntu 22.04 / 24.04 LTS** 的服务器安全加固与 Web 性能优化脚本。
 
@@ -19,9 +19,111 @@
 |------|------|------|
 | `init-mirror.sh` | 换源 + 全量更新 | 自动检测云厂商，切换内网镜像，安全升级系统 |
 | `sec-harden.sh` | 安全加固（18 个模块） | SSH、防火墙、内核安全、审计… |
-| `web-optimize.sh` | 性能优化（30 个模块） | 内核网络、Nginx、PHP、MySQL、Redis… |
+| `web-optimize.sh` | 性能优化（26 个模块） | 内核网络、Nginx、PHP、MySQL、Redis… |
 
-**推荐执行顺序：** `init-mirror.sh` → `sec-harden.sh` → `web-optimize.sh`
+**推荐执行顺序：** `init-mirror.sh` → 安装 1Panel + Web 服务栈 → `sec-harden.sh` → `web-optimize.sh`
+
+---
+
+## 新服务器完整部署流程
+
+以下是从裸机到生产就绪 Web 服务器的完整顺序：
+
+### 阶段一：系统基础（SSH 连上就做）
+
+```bash
+# 1. 下载脚本
+git clone https://github.com/Sun2080/ubuntu-server-hardening.git
+cd ubuntu-server-hardening
+
+# 2. 换源 + 系统全量更新（加速后续所有安装）
+sudo bash init-mirror.sh --auto
+```
+
+### 阶段二：安装 1Panel + Web 服务栈
+
+```bash
+# 3. 安装 1Panel（会自动装 Docker）
+curl -sSL https://resource.fit2cloud.com/1panel/package/quick_start.sh \
+  -o quick_start.sh && sudo bash quick_start.sh
+```
+
+登录 1Panel 面板，在「应用商店」中**依次**安装：
+
+| 顺序 | 应用 | 说明 |
+|------|------|------|
+| ① | OpenResty | 反向代理 + Web 服务器 |
+| ② | MySQL / MariaDB | 数据库 |
+| ③ | PHP | 运行时 |
+| ④ | Redis | 缓存 |
+| ⑤ | phpMyAdmin（可选） | 数据库管理 |
+
+然后在 1Panel 中创建网站、配置域名、部署代码、申请 SSL 证书。
+
+> **为什么先装服务再加固？** `sec-harden.sh` 会自动检测 1Panel 端口放行 UFW，`web-optimize.sh` 需要检测运行中的 Docker 容器来生成配置。
+
+### 阶段三：安全加固
+
+> ❗ **前置要求**：先在云控制台安全组放行新 SSH 端口（默认 2222）
+
+```bash
+# 4. 执行安全加固
+cd ~/ubuntu-server-hardening
+
+# 开发/调试期间用 dev 模式（兼容 VSCode Remote-SSH）：
+SSH_MODE=dev sudo bash sec-harden.sh --auto
+
+# 纯生产服务器：
+# sudo bash sec-harden.sh --auto
+```
+
+```bash
+# 5. ❗ 关键：用新端口测试 SSH 连接（不要断开当前会话！）
+ssh -p 2222 user@你的IP
+```
+
+### 阶段四：性能优化
+
+```bash
+# 6. 确认 SSH 新端口可连后，执行性能优化
+sudo bash web-optimize.sh --auto
+
+# 7. 审查后一键应用 Docker 容器配置
+sudo bash /opt/server-tuning/apply-docker-configs.sh
+```
+
+### 完整顺序总览
+
+```
+服务器到手
+  │
+  ├─ ① init-mirror.sh          换源 + 系统更新
+  │
+  ├─ ② 安装 1Panel              自动装 Docker
+  │
+  ├─ ③ 1Panel 装 Web 栈         OpenResty → MySQL → PHP → Redis
+  │
+  ├─ ④ 部署网站                 建站 + 域名 + SSL
+  │
+  ├─ ⑤ sec-harden.sh           安全加固（检测 1Panel 端口 + Docker）
+  │
+  ├─ ⑥ 验证新 SSH 端口          ⚠ 千万别断当前会话
+  │
+  ├─ ⑦ web-optimize.sh         性能优化（检测容器 + 生成配置）
+  │
+  └─ ⑧ apply-docker-configs.sh 应用容器优化配置
+```
+
+### 云安全组提前放行
+
+在执行 `sec-harden.sh` **之前**，确保云控制台安全组已放行：
+
+| 端口 | 用途 |
+|------|------|
+| `2222/tcp` | SSH 新端口（或你自定义的 `SSH_PORT`） |
+| `80/tcp` | HTTP |
+| `443/tcp` | HTTPS |
+| 1Panel 端口 | 1Panel 面板（安装时会告诉你端口号） |
 
 ---
 
@@ -35,22 +137,12 @@
 # 设置你的 Token（只需执行一次）
 TOKEN="ghp_你的Token"
 
-# 下载两个脚本
-curl -fsSL -H "Authorization: token $TOKEN" \
-  "https://raw.githubusercontent.com/Sun2080/ubuntu-server-hardening/main/sec-harden.sh" \
-  -o sec-harden.sh
-
-curl -fsSL -H "Authorization: token $TOKEN" \
-  "https://raw.githubusercontent.com/Sun2080/ubuntu-server-hardening/main/web-optimize.sh" \
-  -o web-optimize.sh
-
-# 1. 换源 + 系统更新（仅需首次执行）
-sudo bash init-mirror.sh --auto
-
-# 2. 安全加固
-sudo bash sec-harden.sh
-# 3. 性能优化
-sudo bash web-optimize.sh
+# 下载脚本
+for f in init-mirror.sh sec-harden.sh web-optimize.sh; do
+  curl -fsSL -H "Authorization: token $TOKEN" \
+    "https://raw.githubusercontent.com/Sun2080/ubuntu-server-hardening/main/$f" \
+    -o "$f"
+done
 ```
 
 > **快捷方式**：如果目标服务器已安装 `gh` CLI 并登录，也可以直接克隆：
@@ -179,13 +271,14 @@ SWAPPINESS=5 MARIADB_MAX_CONN=200 sudo bash web-optimize.sh --auto
 | 17 | rkhunter | rootkit 检测 + 每周自动扫描 |
 | 18 | MTA 锁定 | Postfix 仅监听 127.0.0.1 |
 
-### web-optimize.sh — 性能优化（30 个模块）
+### web-optimize.sh — 性能优化（26 个模块）
 
 | 类别 | 模块 | 功能 |
 |------|------|------|
 | **系统** | 内核网络 | BBR、TCP 缓冲区 16M、somaxconn=65535、TIME_WAIT 优化 |
 | **系统** | 文件描述符 | file-max=2M、nofile=1M、systemd 全局配置 |
 | **系统** | 内存策略 | swappiness=10、dirty_ratio 优化、vfs_cache_pressure |
+| **系统** | 服务精简 | 禁用 ModemManager/upower/udisks2 释放内存 |
 | **Docker** | 容器检测 | 自动识别 Nginx/PHP/MariaDB/Redis 容器 |
 | **Nginx** | 主配置 | worker_processes=auto、connections=4096、sendfile+tcp_nopush |
 | **Nginx** | Gzip | level=4、256 最小长度、全类型支持 |
@@ -208,9 +301,6 @@ SWAPPINESS=5 MARIADB_MAX_CONN=200 sudo bash web-optimize.sh --auto
 | **Redis** | 安全 | bind 127.0.0.1、rename-command |
 | **Redis** | 性能 | tcp-keepalive=300、慢日志 |
 | **运维** | 配置应用 | 生成 apply-docker-configs.sh 一键应用 |
-| **运维** | 健康检查 | 内存/磁盘/Docker/负载/Swap 每5分钟 |
-| **运维** | 自动清理 | APT/日志/Docker/PHP session 每周日 |
-| **运维** | OOM 防护 | 容器 restart + oom_score_adj 每天刷新 |
 
 ---
 
@@ -246,8 +336,8 @@ sudo bash /root/.web-optimize-backup/<时间戳>/rollback.sh
 
 ```
 init-mirror.sh          # 换源 + 全量更新脚本 (v1.0)
-sec-harden.sh           # 安全加固脚本 (v3.2)
-web-optimize.sh         # 性能优化脚本 (v3.2)
+sec-harden.sh           # 安全加固脚本 (v3.3)
+web-optimize.sh         # 性能优化脚本 (v3.3)
 README.md               # 本文档
 CHANGELOG.md            # 版本变更记录
 LICENSE                  # MIT 许可证
@@ -266,10 +356,6 @@ LICENSE                  # MIT 许可证
 ├── mariadb/                       # MariaDB 配置
 ├── redis/                         # Redis 配置
 └── apply-docker-configs.sh        # 一键应用脚本
-/opt/scripts/                      # 运维脚本
-├── health-check.sh                # 健康检查
-├── auto-maintenance.sh            # 自动清理
-└── oom-protection.sh              # OOM 防护
 /var/log/init-mirror-*.log         # 换源日志
 /var/log/sec-harden-*.log          # 安全加固日志
 /var/log/web-optimize-*.log        # 性能优化日志

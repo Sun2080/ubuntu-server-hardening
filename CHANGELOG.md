@@ -4,6 +4,16 @@
 
 ---
 
+## [3.3] — 2026-03-03
+
+### 修复 (文档审查)
+- **README 模块数虑假**：web-optimize.sh 实际包含 26 个模块（代码编号 A1–G26），README 错写为 30 个模块
+- **README 幽灵模块**：模块表和文件结构中列出了 health-check.sh / auto-maintenance.sh / oom-protection.sh（`/opt/scripts/`），但实际代码并未生成这些脚本（已在早期版本中移除）
+- **README 缺失模块**：代码中的 A4「禁用不必要服务」模块未在模块表中列出
+- **CHANGELOG v1.0 模块数**：同步修正为 26 模块，移除幽灵条目
+
+---
+
 ## [3.2] — 2026-03-03
 
 ### 修复 (实机测试发现)
@@ -145,16 +155,15 @@
   - rkhunter rootkit 扫描
   - MTA 锁定
 
-- **web-optimize.sh**：30 模块性能优化脚本
+- **web-optimize.sh**：26 模块性能优化脚本
   - 内核网络调优 (BBR, TCP, somaxconn)
-  - 文件描述符 + 内存策略
+  - 文件描述符 + 内存策略 + 服务精简
   - Docker 容器自动检测
   - Nginx/OpenResty 全套优化配置
   - PHP-FPM 自适应进程 + OPcache + JIT
   - MariaDB InnoDB 自适应 + 慢查询
   - Redis 自适应内存 + lazyfree
   - apply-docker-configs.sh 一键应用
-  - 健康检查 / 自动清理 / OOM 防护 / Crontab
 
 - **基础设施**
   - 完整备份 + 自动回滚脚本
