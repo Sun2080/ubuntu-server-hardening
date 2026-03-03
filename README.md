@@ -1,6 +1,6 @@
 # Ubuntu Server Hardening & Web Optimization
 
-> **v3.4** | [CHANGELOG](CHANGELOG.md)
+> **v3.6** | [CHANGELOG](CHANGELOG.md)
 
 一套面向 **Ubuntu 22.04 / 24.04 LTS** 的服务器安全加固与 Web 性能优化脚本。
 
@@ -90,11 +90,11 @@ ssh -p 2222 user@你的IP
 ### 阶段四：性能优化
 
 ```bash
-# 7. 确认 SSH 新端口可连后，执行性能优化
+# 7. 确认 SSH 新端口可连后，执行性能优化（--auto 会自动应用 Docker 配置）
 sudo bash web-optimize.sh --auto
 
-# 8. 审查后一键应用 Docker 容器配置
-sudo bash /opt/server-tuning/apply-docker-configs.sh
+# 如果用交互模式，需手动应用 Docker 容器配置：
+# sudo bash /opt/server-tuning/apply-docker-configs.sh
 ```
 
 ### 完整顺序总览
@@ -116,9 +116,7 @@ sudo bash /opt/server-tuning/apply-docker-configs.sh
   │
   ├─ ⑦ 验证新 SSH 端口          ⚠ 千万别断当前会话
   │
-  ├─ ⑧ web-optimize.sh         性能优化（检测容器 + 生成配置）
-  │
-  └─ ⑨ apply-docker-configs.sh 应用容器优化配置
+  └─ ⑧ web-optimize.sh --auto   性能优化 + 自动应用容器配置
 ```
 
 ### 云安全组提前放行
@@ -153,8 +151,9 @@ done
 
 ### 用法
 
-cd ~/ubuntu-server-hardening
 ```bash
+cd ~/ubuntu-server-hardening
+
 # ========== init-mirror.sh ==========
 sudo bash init-mirror.sh                  # 交互模式（选择云厂商）
 sudo bash init-mirror.sh --auto           # 自动检测云厂商 + 确认
@@ -170,7 +169,7 @@ SSH_MODE=dev sudo bash sec-harden.sh --auto  # 开发模式（兼容 VSCode Remo
 
 # ========== web-optimize.sh ==========
 sudo bash web-optimize.sh                  # 交互模式
-sudo bash web-optimize.sh --auto           # 自动执行（危险操作仍需确认）
+sudo bash web-optimize.sh --auto           # 自动执行 + 自动应用 Docker 配置
 sudo bash web-optimize.sh --auto --force   # 全自动无交互
 sudo bash web-optimize.sh --dry-run        # 仅生成配置不应用系统参数
 ```
@@ -325,9 +324,10 @@ sudo bash /root/.web-optimize-backup/<时间戳>/rollback.sh
 ## 核心原则
 
 - **sec-harden.sh**: 纯安全加固，不涉及性能调优
-- **web-optimize.sh**: 纯性能优化，**不直接修改 Docker 容器**
+- **web-optimize.sh**: 纯性能优化
   - 所有 Docker 服务配置生成到 `/opt/server-tuning/` 目录
-  - 同时生成 `apply-docker-configs.sh` 供审查后一键应用
+  - `--auto` 模式自动应用 Docker 配置；交互模式生成 `apply-docker-configs.sh` 供审查后一键应用
+  - 支持 1Panel 单文件 bind-mount（自动检测 `docker inspect` 挂载路径，inode 安全写入）
 - 所有参数可通过环境变量覆盖
 - 每步备份原文件、自动生成回滚脚本
 - 最终验证 + YAML 诊断报告
@@ -339,7 +339,8 @@ sudo bash /root/.web-optimize-backup/<时间戳>/rollback.sh
 ```
 init-mirror.sh          # 换源 + 全量更新脚本 (v1.0)
 sec-harden.sh           # 安全加固脚本 (v3.3)
-web-optimize.sh         # 性能优化脚本 (v3.3)
+web-optimize.sh         # 性能优化脚本 (v3.6)
+lib/common.sh           # 公共函数库
 README.md               # 本文档
 CHANGELOG.md            # 版本变更记录
 LICENSE                  # MIT 许可证

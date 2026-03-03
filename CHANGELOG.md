@@ -4,6 +4,25 @@
 
 ---
 
+## [3.6] — 2026-03-03
+
+### 新增
+- **`--auto` 模式自动应用 Docker 配置**：不再需要手动执行 `apply-docker-configs.sh`，`--auto` 模式下自动应用（`--force` 跳过确认）
+- **PHP 1Panel 单文件 bind-mount 支持**：1Panel 将 `php.ini` 和 `php-fpm.conf` 以单文件挂载，新增 `_merge_php_ini` 函数智能合并 OPcache/安全/Session 配置到宿主机文件
+- **三层 PHP 配置检测**：conf.d 目录挂载 → php.ini/www.conf 单文件挂载 → docker cp fallback
+
+### 修复
+- **Redis CONFIG REWRITE 失败**：Docker 单文件 bind-mount 导致 `rename()` 返回 EBUSY，改用 `mktemp + cat >` 保留 inode 的安全写入方式
+- **1Panel Nginx/MariaDB/Redis 宿主机路径检测失败**：`detect_host_mount` 仅检测目录路径，1Panel 的 `nginx.conf`/`my.cnf`/`redis.conf` 单文件挂载匹配不上。新增单文件挂载检测
+- **MariaDB conf.d 目录不存在**：检测到 `my.cnf` 单文件挂载时，自动在同级目录创建 `conf.d` 并将优化配置写入
+
+### 改进
+- inode 安全写入模式：所有单文件 bind-mount 场景均使用 `mktemp + cat >` 避免 EBUSY
+- README 更新：部署流程简化为 8 步（移除独立 apply 步骤），核心原则更新
+- ShellCheck 零警告 + 80 测试全部通过
+
+---
+
 ## [3.5] — 2025-07-18
 
 ### 新增

@@ -9,7 +9,7 @@
 #    sudo bash web-optimize.sh --dry-run        # 仅生成配置不应用
 ###############################################################################
 set -Euo pipefail
-SCRIPT_VERSION="3.3"
+SCRIPT_VERSION="3.6"
 
 trap '_err_handler $LINENO "$BASH_COMMAND"' ERR
 _err_handler() {
@@ -723,6 +723,14 @@ generate_php_config() {
 
     local php_dir="$OUTPUT_DIR/php"
 
+    # 检测容器内 PHP 日志目录 (1Panel 用 /var/log/php, 其他通常用 /var/log/php-fpm)
+    local php_log_dir="/var/log/php-fpm"
+    if [[ -n "$PHP_CONTAINER" ]]; then
+        local _detected_log_dir
+        _detected_log_dir=$(docker exec "$PHP_CONTAINER" sh -c 'for d in /var/log/php /var/log/php-fpm; do [ -d "$d" ] && echo "$d" && break; done' 2>/dev/null)
+        [[ -n "$_detected_log_dir" ]] && php_log_dir="$_detected_log_dir"
+    fi
+
     # ─── D14: PHP-FPM 进程管理 ────────────────────────────────────────────
     cat > "$php_dir/www.conf" << EOF
 ; === web-optimize.sh PHP-FPM 进程池配置 ===
@@ -745,7 +753,7 @@ pm.max_requests = ${PHP_MAX_REQUESTS}
 pm.process_idle_timeout = 10s
 
 ; 慢日志
-slowlog = /var/log/php-fpm/slow.log
+slowlog = ${php_log_dir}/slow.log
 request_slowlog_timeout = ${PHP_SLOWLOG_TIMEOUT}s
 request_terminate_timeout = 300s
 
@@ -758,7 +766,7 @@ ping.response = pong
 catch_workers_output = yes
 decorate_workers_output = no
 php_admin_flag[log_errors] = on
-php_admin_value[error_log] = /var/log/php-fpm/error.log
+php_admin_value[error_log] = ${php_log_dir}/error.log
 EOF
 
     log "INFO" "PHP-FPM 进程: max=$max_children, start=$start_servers, min_spare=$min_spare, max_spare=$max_spare"
@@ -792,7 +800,7 @@ expose_php = Off
 display_errors = Off
 display_startup_errors = Off
 log_errors = On
-error_log = /var/log/php-fpm/php_errors.log
+error_log = ${php_log_dir}/php_errors.log
 error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
 
 ; 危险函数禁用 (保留 proc_open/exec 以兼容 Composer/WP-CLI/WP-Cron)
@@ -1097,7 +1105,11 @@ log "已复制 snippets 到 ${nginx_host_confd%/conf.d}/snippets/"
 log "⚠ 请在各站点 server 块中添加: include snippets/security-headers.conf; 和 include snippets/block-sensitive.conf;"
 
 # 重载 OpenResty
-docker exec "$NGINX_CONTAINER" nginx -t 2>&1 && docker exec "$NGINX_CONTAINER" nginx -s reload && log "OpenResty 配置已重载" || warn "OpenResty 配置未变化，跳过重载"
+if docker exec "$NGINX_CONTAINER" nginx -t 2>&1; then
+    docker exec "$NGINX_CONTAINER" nginx -s reload && log "OpenResty 配置已重载" || warn "OpenResty 重载失败，请手动检查"
+else
+    warn "OpenResty 配置语法检查失败，未重载，请手动检查"
+fi
 EOF
         else
             cat >> "$APPLY_SCRIPT" << EOF
@@ -1195,19 +1207,31 @@ _merge_php_ini() {
     _tmpf=$(mktemp)
     cp "$target" "$_tmpf"
 
+    # 正则变量避免 bash [[ =~ ]] 对 ; 和 [ 的解析问题
+    local _re_comment='^[[:space:]]*[;#]'
+    local _re_section='^[[:space:]]*\[.*\]'
+
     while IFS='=' read -r key value; do
-        # 跳过注释和空行
-        [[ "$key" =~ ^[[:space:]]*[;\#] ]] && continue
+        # 跳过注释、空行和 INI section 头 ([section])
+        [[ "$key" =~ $_re_comment ]] && continue
+        [[ "$key" =~ $_re_section ]] && continue
         [[ -z "$key" ]] && continue
         key=$(echo "$key" | xargs)
         value=$(echo "$value" | xargs)
         [[ -z "$key" ]] && continue
 
-        if grep -qE "^[[:space:]]*${key}[[:space:]]*=" "$_tmpf" 2>/dev/null; then
-            sed -i "s|^[[:space:]]*${key}[[:space:]]*=.*|${key} = ${value}|" "$_tmpf"
-        elif grep -qE "^[[:space:]]*;[[:space:]]*${key}[[:space:]]*=" "$_tmpf" 2>/dev/null; then
+        # 转义 key 中的正则特殊字符 (如 . [] 等)
+        local ekey
+        ekey=$(printf '%s' "$key" | sed 's/[].[\^$*+?(){}|]/\\&/g')
+        # 转义 value 中的 sed 替换特殊字符 (& 和 \)
+        local svalue
+        svalue=$(printf '%s' "$value" | sed 's/[&\\]/\\&/g')
+
+        if grep -qE "^[[:space:]]*${ekey}[[:space:]]*=" "$_tmpf" 2>/dev/null; then
+            sed -i "s|^[[:space:]]*${ekey}[[:space:]]*=.*|${key} = ${svalue}|" "$_tmpf"
+        elif grep -qE "^[[:space:]]*;[[:space:]]*${ekey}[[:space:]]*=" "$_tmpf" 2>/dev/null; then
             # 取消注释并设置值
-            sed -i "s|^[[:space:]]*;[[:space:]]*${key}[[:space:]]*=.*|${key} = ${value}|" "$_tmpf"
+            sed -i "s|^[[:space:]]*;[[:space:]]*${ekey}[[:space:]]*=.*|${key} = ${svalue}|" "$_tmpf"
         else
             echo "${key} = ${value}" >> "$_tmpf"
         fi
@@ -1232,6 +1256,9 @@ _merge_php_ini "$php_host_fpm" "\$OUTPUT_DIR/php/www.conf" "PHP-FPM"
 EOF
             fi
             cat >> "$APPLY_SCRIPT" << EOF
+
+# 确保日志目录存在
+docker exec "$PHP_CONTAINER" mkdir -p /var/log/php-fpm /var/log/php 2>/dev/null || true
 
 # 重启 PHP-FPM 容器
 docker restart "$PHP_CONTAINER"
