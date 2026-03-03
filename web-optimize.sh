@@ -1126,12 +1126,27 @@ EOF
     if [[ -n "$PHP_CONTAINER" ]]; then
         # 通过 Docker inspect 自动检测宿主机挂载路径
         local php_host_confd=""
+        local php_host_ini=""
+        local php_host_fpm=""
         local _pc
         _pc=$(detect_host_mount "$PHP_CONTAINER" "/usr/local/etc/php/conf.d")
         [[ -z "$_pc" ]] && _pc=$(detect_host_mount "$PHP_CONTAINER" "/etc/php/conf.d")
         if [[ -n "$_pc" && -d "$_pc" ]]; then
             php_host_confd="$_pc"
             log "INFO" "通过 Docker mount 检测到 PHP conf.d: $_pc"
+        fi
+        # 1Panel 单文件挂载: php.ini 和 www.conf 直接 bind-mount
+        if [[ -z "$php_host_confd" ]]; then
+            php_host_ini=$(detect_host_mount "$PHP_CONTAINER" "/usr/local/etc/php/php.ini")
+            [[ -z "$php_host_ini" ]] && php_host_ini=$(detect_host_mount "$PHP_CONTAINER" "/etc/php/php.ini")
+            php_host_fpm=$(detect_host_mount "$PHP_CONTAINER" "/usr/local/etc/php-fpm.d/www.conf")
+            [[ -z "$php_host_fpm" ]] && php_host_fpm=$(detect_host_mount "$PHP_CONTAINER" "/etc/php-fpm.d/www.conf")
+            if [[ -n "$php_host_ini" && -f "$php_host_ini" ]]; then
+                log "INFO" "通过 Docker mount 检测到 PHP 配置文件: $php_host_ini"
+            fi
+            if [[ -n "$php_host_fpm" && -f "$php_host_fpm" ]]; then
+                log "INFO" "通过 Docker mount 检测到 PHP-FPM 配置文件: $php_host_fpm"
+            fi
         fi
 
         # 检测 PHP www.conf 在容器内的实际路径
@@ -1158,6 +1173,69 @@ log "PHP 配置已复制到 $php_host_confd"
 # 重启 PHP-FPM 容器
 docker restart "$PHP_CONTAINER"
 log "PHP-FPM 容器已重启"
+EOF
+        elif [[ -n "$php_host_ini" && -f "$php_host_ini" ]]; then
+            # 1Panel 单文件挂载: 通过 inode 安全写入合并配置到 php.ini
+            cat >> "$APPLY_SCRIPT" << EOF
+
+# 通过宿主机单文件挂载应用 PHP 配置 (1Panel 模式)
+cp -a "$php_host_ini" "\$BACKUP_DIR/php.ini.bak" 2>/dev/null || true
+EOF
+            if [[ -n "$php_host_fpm" && -f "$php_host_fpm" ]]; then
+                cat >> "$APPLY_SCRIPT" << EOF
+cp -a "$php_host_fpm" "\$BACKUP_DIR/www.conf.bak" 2>/dev/null || true
+EOF
+            fi
+            cat >> "$APPLY_SCRIPT" << 'PHPEOF'
+
+# 合并 OPcache/安全/Session 配置到 php.ini (inode 安全写入)
+_merge_php_ini() {
+    local target="$1" source="$2" label="$3"
+    local _tmpf
+    _tmpf=$(mktemp)
+    cp "$target" "$_tmpf"
+
+    while IFS='=' read -r key value; do
+        # 跳过注释和空行
+        [[ "$key" =~ ^[[:space:]]*[;\#] ]] && continue
+        [[ -z "$key" ]] && continue
+        key=$(echo "$key" | xargs)
+        value=$(echo "$value" | xargs)
+        [[ -z "$key" ]] && continue
+
+        if grep -qE "^[[:space:]]*${key}[[:space:]]*=" "$_tmpf" 2>/dev/null; then
+            sed -i "s|^[[:space:]]*${key}[[:space:]]*=.*|${key} = ${value}|" "$_tmpf"
+        elif grep -qE "^[[:space:]]*;[[:space:]]*${key}[[:space:]]*=" "$_tmpf" 2>/dev/null; then
+            # 取消注释并设置值
+            sed -i "s|^[[:space:]]*;[[:space:]]*${key}[[:space:]]*=.*|${key} = ${value}|" "$_tmpf"
+        else
+            echo "${key} = ${value}" >> "$_tmpf"
+        fi
+    done < "$source"
+
+    cat "$_tmpf" > "$target"
+    rm -f "$_tmpf"
+    log "已合并 $label 配置到 $target"
+}
+
+PHPEOF
+            cat >> "$APPLY_SCRIPT" << EOF
+_merge_php_ini "$php_host_ini" "\$OUTPUT_DIR/php/opcache.ini" "OPcache"
+_merge_php_ini "$php_host_ini" "\$OUTPUT_DIR/php/security.ini" "安全"
+_merge_php_ini "$php_host_ini" "\$OUTPUT_DIR/php/session-security.ini" "Session"
+EOF
+            if [[ -n "$php_host_fpm" && -f "$php_host_fpm" ]]; then
+                cat >> "$APPLY_SCRIPT" << EOF
+
+# 合并 www.conf 优化配置
+_merge_php_ini "$php_host_fpm" "\$OUTPUT_DIR/php/www.conf" "PHP-FPM"
+EOF
+            fi
+            cat >> "$APPLY_SCRIPT" << EOF
+
+# 重启 PHP-FPM 容器
+docker restart "$PHP_CONTAINER"
+log "PHP-FPM 配置已通过宿主机文件应用并重启"
 EOF
         else
             cat >> "$APPLY_SCRIPT" << EOF
