@@ -91,15 +91,15 @@ log() {
         ERROR) color="$RED"    ;;
         STEP)  color="$CYAN"   ;;
     esac
-    printf "${color}[%s] [%-5s] %s${NC}\n" "$ts" "$level" "$*" | tee -a "$LOG_FILE"
+    printf '%b[%s] [%-5s] %s%b\n' "$color" "$ts" "$level" "$*" "$NC" | tee -a "$LOG_FILE"
 }
 
 step_banner() {
     local num=$1; shift
     echo "" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}  步骤 %s: %s${NC}\n" "$num" "$*" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════${NC}\n" | tee -a "$LOG_FILE"
+    printf '%b═══════════════════════════════════════════════════════════════%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '%b  步骤 %s: %s%b\n' "${BOLD}${CYAN}" "$num" "$*" "${NC}" | tee -a "$LOG_FILE"
+    printf '%b═══════════════════════════════════════════════════════════════%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
 }
 
 check_result() {
@@ -107,10 +107,10 @@ check_result() {
     TOTAL_COUNT=$((TOTAL_COUNT + 1))
     if [[ "$result" == "pass" ]]; then
         PASS_COUNT=$((PASS_COUNT + 1))
-        printf "  ${GREEN}✓${NC} %s\n" "$desc" | tee -a "$LOG_FILE"
+        printf '  %b✓%b %s\n' "${GREEN}" "${NC}" "$desc" | tee -a "$LOG_FILE"
     else
         FAIL_COUNT=$((FAIL_COUNT + 1))
-        printf "  ${RED}✗${NC} %s\n" "$desc" | tee -a "$LOG_FILE"
+        printf '  %b✗%b %s\n' "${RED}" "${NC}" "$desc" | tee -a "$LOG_FILE"
     fi
 }
 
@@ -180,8 +180,8 @@ confirm_dangerous() {
         return 0
     fi
     echo "" | tee -a "$LOG_FILE"
-    printf "  ${YELLOW}⚠ 危险操作: %s${NC}\n" "$msg" | tee -a "$LOG_FILE"
-    printf "  ${BOLD}确认继续? [y/N]: ${NC}"
+    printf '  %b⚠ 危险操作: %s%b\n' "${YELLOW}" "${NC}" "$msg" | tee -a "$LOG_FILE"
+    printf '  %b确认继续? [y/N]: %b' "${BOLD}" "${NC}"
     read -r answer </dev/tty 2>/dev/null || answer="n"
     case "$answer" in
         [yY]*) return 0 ;;
@@ -1266,9 +1266,9 @@ FOOTER
 ###############################################################################
 run_verification() {
     echo "" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════════╗${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}║                      验  证  结  果                          ║${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════════╝${NC}\n" | tee -a "$LOG_FILE"
+    printf '%b╔═══════════════════════════════════════════════════════════════╗%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '%b║                      验  证  结  果                          ║%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '%b╚═══════════════════════════════════════════════════════════════╝%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
 
     PASS_COUNT=0; FAIL_COUNT=0; TOTAL_COUNT=0
 
@@ -1303,8 +1303,8 @@ run_verification() {
     echo "" | tee -a "$LOG_FILE"
     local rate=0
     [[ $TOTAL_COUNT -gt 0 ]] && rate=$((PASS_COUNT * 100 / TOTAL_COUNT))
-    printf "${BOLD}验证结果: ${GREEN}✓ %d 通过${NC} / ${RED}✗ %d 失败${NC} / 共 %d 项 (通过率 %d%%)${NC}\n" \
-        "$PASS_COUNT" "$FAIL_COUNT" "$TOTAL_COUNT" "$rate" | tee -a "$LOG_FILE"
+    printf '%b验证结果: %b✓ %d 通过%b / %b✗ %d 失败%b / 共 %d 项 (通过率 %d%%)%b\n' \
+        "$BOLD" "$GREEN" "$PASS_COUNT" "$NC" "$RED" "$FAIL_COUNT" "$NC" "$TOTAL_COUNT" "$rate" "$NC" | tee -a "$LOG_FILE"
 }
 
 ###############################################################################
@@ -1367,7 +1367,7 @@ YAMLEOF
 ###############################################################################
 interactive_menu() {
     echo ""
-    printf "${BOLD}${CYAN}═══ 当前系统信息 ═══${NC}\n"
+    printf '%b═══ 当前系统信息 ═══%b\n' "${BOLD}${CYAN}" "${NC}"
     printf "  CPU: %s 核  |  内存: %sMB 总量, %sMB 可用\n" "$(get_cpu_cores)" "$(get_total_mem_mb)" "$(get_available_mem_mb)"
     printf "  磁盘: %s\n" "$(df -h / | awk 'NR==2{print $2" 总量, "$3" 已用, "$5" 使用率"}')"
 
@@ -1389,18 +1389,18 @@ interactive_menu() {
     printf "    6. 生成 Nginx/PHP/MariaDB/Redis 优化配置\n"
     echo ""
 
-    printf "  配置将生成到 ${YELLOW}$OUTPUT_DIR${NC}，不直接修改容器内部文件\n"
-    printf "  同时生成 ${YELLOW}apply-docker-configs.sh${NC} 供审查后一键应用\n"
+    printf '  配置将生成到 %b%s%b，不直接修改容器内部文件\n' "$YELLOW" "$OUTPUT_DIR" "$NC"
+    printf '  同时生成 %bapply-docker-configs.sh%b 供审查后一键应用\n' "${YELLOW}" "${NC}"
     echo ""
 
-    printf "  是否自动应用 Docker 配置? [y/${YELLOW}N${NC}]: "
+    printf '  是否自动应用 Docker 配置? [y/%bN%b]: ' "${YELLOW}" "${NC}"
     read -r auto_apply
     case "$auto_apply" in
         [yY]*) export AUTO_APPLY="yes" ;;
         *) export AUTO_APPLY="no" ;;
     esac
 
-    printf "  按 ${YELLOW}Enter${NC} 开始执行，${YELLOW}Ctrl+C${NC} 取消..."
+    printf '  按 %bEnter%b 开始执行，%bCtrl+C%b 取消...' "${YELLOW}" "${NC}" "${YELLOW}" "${NC}"
     read -r
 }
 
@@ -1412,17 +1412,17 @@ show_final_summary() {
     [[ $TOTAL_COUNT -gt 0 ]] && rate=$((PASS_COUNT * 100 / TOTAL_COUNT))
 
     echo "" | tee -a "$LOG_FILE"
-    printf "${BOLD}${GREEN}╔═══════════════════════════════════════════════════════════════╗${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${GREEN}║                 性能优化完成                                 ║${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${GREEN}╚═══════════════════════════════════════════════════════════════╝${NC}\n" | tee -a "$LOG_FILE"
+    printf '%b╔═══════════════════════════════════════════════════════════════╗%b\n' "${BOLD}${GREEN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '%b║                 性能优化完成                                 ║%b\n' "${BOLD}${GREEN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '%b╚═══════════════════════════════════════════════════════════════╝%b\n' "${BOLD}${GREEN}" "${NC}" | tee -a "$LOG_FILE"
 
     # ── 前后对比表 ──
     echo "" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}┌─────────────────────┬──────────────────┬──────────────────┐${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}│ %-19s │ %-16s │ %-16s │${NC}\n" "项目" "优化前" "优化后" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}├─────────────────────┼──────────────────┼──────────────────┤${NC}\n" | tee -a "$LOG_FILE"
+    printf '%b┌─────────────────────┬──────────────────┬──────────────────┐%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '%b│ %-19s │ %-16s │ %-16s │%b\n' "${BOLD}${CYAN}" "项目" "优化前" "优化后" "${NC}" | tee -a "$LOG_FILE"
+    printf '%b├─────────────────────┼──────────────────┼──────────────────┤%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
 
-    _row() { printf "${CYAN}│${NC} %-19s ${CYAN}│${NC} %-16s ${CYAN}│${NC} ${GREEN}%-16s${NC} ${CYAN}│${NC}\n" "$1" "$2" "$3" | tee -a "$LOG_FILE"; }
+    _row() { printf '%b│%b %-19s %b│%b %-16s %b│%b %b%-16s%b %b│%b\n' "$CYAN" "$NC" "$1" "$CYAN" "$NC" "$2" "$CYAN" "$NC" "$GREEN" "$3" "$NC" "$CYAN" "$NC" | tee -a "$LOG_FILE"; }
 
     _row "TCP 拥塞控制"    "${BEFORE_STATE[bbr]:-?}"       "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '?')"
     _row "somaxconn"       "${BEFORE_STATE[somaxconn]:-?}" "$(sysctl -n net.core.somaxconn 2>/dev/null || echo '?')"
@@ -1430,47 +1430,47 @@ show_final_summary() {
     _row "swappiness"      "${BEFORE_STATE[swappiness]:-?}" "$(sysctl -n vm.swappiness 2>/dev/null || echo '?')"
     _row "TCP Fast Open"   "${BEFORE_STATE[tcp_fastopen]:-?}" "$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null || echo '?')"
 
-    printf "${BOLD}${CYAN}└─────────────────────┴──────────────────┴──────────────────┘${NC}\n" | tee -a "$LOG_FILE"
+    printf '%b└─────────────────────┴──────────────────┴──────────────────┘%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
 
     # ── 验证通过率 ──
     echo "" | tee -a "$LOG_FILE"
-    printf "  ${BOLD}验证通过率: ${GREEN}%d/%d (%d%%)${NC}\n" "$PASS_COUNT" "$TOTAL_COUNT" "$rate" | tee -a "$LOG_FILE"
+    printf '  %b验证通过率: %b%d/%d (%d%%)%b\n' "$BOLD" "$GREEN" "$PASS_COUNT" "$TOTAL_COUNT" "$rate" "$NC" | tee -a "$LOG_FILE"
 
     # ── 你得到了什么 ──
     echo "" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}═══ 本次优化为你带来 ═══${NC}\n" | tee -a "$LOG_FILE"
-    printf "  ${GREEN}✓${NC} 内核调优: BBR 拥塞控制, TCP Fast Open, 高性能缓冲区\n" | tee -a "$LOG_FILE"
-    printf "  ${GREEN}✓${NC} 资源限制: file-max=%s, nofile=%s, swappiness=%s\n" "$SYSCTL_FILE_MAX" "$ULIMIT_NOFILE" "$SWAPPINESS" | tee -a "$LOG_FILE"
+    printf '%b═══ 本次优化为你带来 ═══%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '  %b✓%b 内核调优: BBR 拥塞控制, TCP Fast Open, 高性能缓冲区\n' "${GREEN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '  %b✓%b 资源限制: file-max=%s, nofile=%s, swappiness=%s\n' "${GREEN}" "${NC}" "$SYSCTL_FILE_MAX" "$ULIMIT_NOFILE" "$SWAPPINESS" | tee -a "$LOG_FILE"
 
     if [[ -n "$NGINX_CONTAINER" ]]; then
-        printf "  ${GREEN}✓${NC} Nginx 优化: workers=auto, connections=%s, gzip, fastcgi_cache, 安全头\n" "$NGINX_WORKER_CONNECTIONS" | tee -a "$LOG_FILE"
+        printf '  %b✓%b Nginx 优化: workers=auto, connections=%s, gzip, fastcgi_cache, 安全头\n' "${GREEN}" "${NC}" "$NGINX_WORKER_CONNECTIONS" | tee -a "$LOG_FILE"
     fi
     if [[ -n "$PHP_CONTAINER" ]]; then
         local mc; mc=$(awk -F'=' '/pm.max_children/{print $2}' "$OUTPUT_DIR/php/www.conf" 2>/dev/null | xargs)
-        printf "  ${GREEN}✓${NC} PHP-FPM 优化: max_children=%s, OPcache+JIT, 安全加固\n" "${mc:-auto}" | tee -a "$LOG_FILE"
+        printf '  %b✓%b PHP-FPM 优化: max_children=%s, OPcache+JIT, 安全加固\n' "${GREEN}" "${NC}" "${mc:-auto}" | tee -a "$LOG_FILE"
     fi
     if [[ -n "$MARIADB_CONTAINER" ]]; then
         local bp; bp=$(awk -F'=' '/innodb_buffer_pool_size/{print $2}' "$OUTPUT_DIR/mariadb/custom.cnf" 2>/dev/null | xargs)
-        printf "  ${GREEN}✓${NC} MariaDB 优化: buffer_pool=%s, 慢查询日志, 连接管理\n" "${bp:-auto}" | tee -a "$LOG_FILE"
+        printf '  %b✓%b MariaDB 优化: buffer_pool=%s, 慢查询日志, 连接管理\n' "${GREEN}" "${NC}" "${bp:-auto}" | tee -a "$LOG_FILE"
     fi
     if [[ -n "$REDIS_CONTAINER" ]]; then
         local rm; rm=$(awk '/^maxmemory /{print $2}' "$OUTPUT_DIR/redis/custom.conf" 2>/dev/null)
-        printf "  ${GREEN}✓${NC} Redis 优化: maxmemory=%s, policy=%s, lazyfree\n" "${rm:-auto}" "$REDIS_POLICY" | tee -a "$LOG_FILE"
+        printf '  %b✓%b Redis 优化: maxmemory=%s, policy=%s, lazyfree\n' "${GREEN}" "${NC}" "${rm:-auto}" "$REDIS_POLICY" | tee -a "$LOG_FILE"
     fi
 
     # ── 检测到的容器 ──
     if [[ -n "$NGINX_CONTAINER$PHP_CONTAINER$MARIADB_CONTAINER$REDIS_CONTAINER" ]]; then
         echo "" | tee -a "$LOG_FILE"
-        printf "${BOLD}${CYAN}═══ 检测到的 Docker 容器 ═══${NC}\n" | tee -a "$LOG_FILE"
-        [[ -n "$NGINX_CONTAINER" ]]  && printf "  ${GREEN}●${NC} Nginx/OpenResty: %s\n" "$NGINX_CONTAINER" | tee -a "$LOG_FILE"
-        [[ -n "$PHP_CONTAINER" ]]    && printf "  ${GREEN}●${NC} PHP-FPM:         %s\n" "$PHP_CONTAINER" | tee -a "$LOG_FILE"
-        [[ -n "$MARIADB_CONTAINER" ]] && printf "  ${GREEN}●${NC} MariaDB/MySQL:   %s\n" "$MARIADB_CONTAINER" | tee -a "$LOG_FILE"
-        [[ -n "$REDIS_CONTAINER" ]]  && printf "  ${GREEN}●${NC} Redis:           %s\n" "$REDIS_CONTAINER" | tee -a "$LOG_FILE"
+        printf '%b═══ 检测到的 Docker 容器 ═══%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
+        [[ -n "$NGINX_CONTAINER" ]]  && printf '  %b●%b Nginx/OpenResty: %s\n' "$GREEN" "$NC" "$NGINX_CONTAINER" | tee -a "$LOG_FILE"
+        [[ -n "$PHP_CONTAINER" ]]    && printf '  %b●%b PHP-FPM:         %s\n' "$GREEN" "$NC" "$PHP_CONTAINER" | tee -a "$LOG_FILE"
+        [[ -n "$MARIADB_CONTAINER" ]] && printf '  %b●%b MariaDB/MySQL:   %s\n' "$GREEN" "$NC" "$MARIADB_CONTAINER" | tee -a "$LOG_FILE"
+        [[ -n "$REDIS_CONTAINER" ]]  && printf '  %b●%b Redis:           %s\n' "$GREEN" "$NC" "$REDIS_CONTAINER" | tee -a "$LOG_FILE"
     fi
 
     # ── 生成的文件 ──
     echo "" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}═══ 生成的文件 ═══${NC}\n" | tee -a "$LOG_FILE"
+    printf '%b═══ 生成的文件 ═══%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
     printf "  配置目录:    %s\n" "$OUTPUT_DIR" | tee -a "$LOG_FILE"
     printf "  应用脚本:    %s\n" "$APPLY_SCRIPT" | tee -a "$LOG_FILE"
     printf "  日志文件:    %s\n" "$LOG_FILE" | tee -a "$LOG_FILE"
@@ -1479,19 +1479,19 @@ show_final_summary() {
 
     # ── 下一步操作 ──
     echo "" | tee -a "$LOG_FILE"
-    printf "${YELLOW}下一步操作:${NC}\n" | tee -a "$LOG_FILE"
+    printf '%b下一步操作:%b\n' "${YELLOW}" "${NC}" | tee -a "$LOG_FILE"
     if [[ -n "$NGINX_CONTAINER$PHP_CONTAINER$MARIADB_CONTAINER$REDIS_CONTAINER" ]]; then
         if [[ "${AUTO_APPLY:-no}" == "yes" ]]; then
-            printf "  ${GREEN}✓${NC} Docker 配置已自动应用\n" | tee -a "$LOG_FILE"
+            printf '  %b✓%b Docker 配置已自动应用\n' "${GREEN}" "${NC}" | tee -a "$LOG_FILE"
         else
-            printf "  1. 审查配置: ${BOLD}ls -la %s/*/${NC}\n" "$OUTPUT_DIR" | tee -a "$LOG_FILE"
-            printf "  2. 应用配置: ${BOLD}sudo bash %s${NC}\n" "$APPLY_SCRIPT" | tee -a "$LOG_FILE"
+            printf '  1. 审查配置: %bls -la %s/*/%b\n' "${BOLD}" "$OUTPUT_DIR" "${NC}" | tee -a "$LOG_FILE"
+            printf '  2. 应用配置: %bsudo bash %s%b\n' "${BOLD}" "$APPLY_SCRIPT" "${NC}" | tee -a "$LOG_FILE"
         fi
     else
         printf "  未检测到 Docker 容器，配置模板已生成到 %s\n" "$OUTPUT_DIR" | tee -a "$LOG_FILE"
-        printf "  部署容器后运行: ${BOLD}sudo bash %s${NC}\n" "$APPLY_SCRIPT" | tee -a "$LOG_FILE"
+        printf '  部署容器后运行: %bsudo bash %s%b\n' "${BOLD}" "$APPLY_SCRIPT" "${NC}" | tee -a "$LOG_FILE"
     fi
-    printf "  如需回滚: ${BOLD}sudo bash %s${NC}\n" "$ROLLBACK_SCRIPT" | tee -a "$LOG_FILE"
+    printf '  如需回滚: %bsudo bash %s%b\n' "${BOLD}" "$ROLLBACK_SCRIPT" "${NC}" | tee -a "$LOG_FILE"
 }
 
 ###############################################################################
@@ -1522,11 +1522,11 @@ main() {
     init_dirs
     capture_before_state
 
-    printf "${BOLD}${GREEN}"
+    printf '%b' "${BOLD}${GREEN}"
     printf "╔═══════════════════════════════════════════════════════════════╗\n"
-    printf "║     Web 服务器性能优化脚本 web-optimize.sh v$SCRIPT_VERSION        ║\n"
+    printf '║     Web 服务器性能优化脚本 web-optimize.sh v%s        ║\n' "$SCRIPT_VERSION"
     printf "╚═══════════════════════════════════════════════════════════════╝\n"
-    printf "${NC}\n"
+    printf '%b\n' "${NC}"
 
     if [[ "$AUTO_MODE" != "yes" && "$DRY_RUN" != "yes" ]]; then
         interactive_menu

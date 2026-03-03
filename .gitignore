@@ -9,6 +9,7 @@
 # Backup directories
 .sec-harden-backup/
 .web-optimize-backup/
+.init-mirror-backup/
 
 # OS files
 .DS_Store

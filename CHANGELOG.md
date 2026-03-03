@@ -4,6 +4,27 @@
 
 ---
 
+## [3.5] — 2025-07-18
+
+### 新增
+- **公共函数库** `lib/common.sh`：抽取 log / step_banner / check_result / check_root / check_os / backup_file / confirm_dangerous / confirm_action 等公共函数，供未来脚本复用
+- **自动化测试** `tests/test.sh`：18 类共 80 项测试覆盖文件完整性、语法、ShellCheck、函数定义、安全扫描、编码格式等
+
+### 修复
+- **[关键] sec-harden.sh 无人值守升级配置失败**：`configure_unattended_upgrades()` 中 `sed` 使用单引号，导致 `${distro_id}:${distro_codename}` 永远不会展开，uncomment 命令匹配不到目标行（修复: 先读取 os-release 变量，改用双引号 sed）
+- **init-mirror.sh Docker 镜像加速冗余代码**：`configure_docker_mirror()` 中存在两段 Python3 代码——第一段写入临时文件 `tmp_json` 后未被使用，第二段才真正修改 `daemon.json`（修复: 移除死代码，简化为单次检查+单次修改流程）
+- **SC2059 printf 格式字符串安全**：全部三个脚本共 83 处 `printf "$VAR..."` 改为 `printf '%b...' "$VAR"` 格式，消除变量注入风险
+- **SC2013 for 循环读文件**：sec-harden.sh 中 `for u in $(awk ...)` 改为 `while read` 循环，避免词分割和通配符展开问题
+- **SC2002 无用 cat**：init-mirror.sh 中 `cat file | python3` 改为输入重定向
+- **SC2016 单引号中变量不展开**：修复 6 处单引号字符串中 `$VAR` 不展开的问题（涉及 SSH 端口、镜像标签、脚本版本号等）
+- **验证摘要 printf 参数错位**：修复 5 处验证结果行 `%b`/`%d` 格式说明符与实际参数顺序不匹配的问题
+
+### 改进
+- ShellCheck warning 级别零警告（4 个脚本全部通过）
+- 所有 printf 格式字符串统一使用 `'%b'` 单引号格式 + 位置参数，杜绝 SC2059
+
+---
+
 ## [3.4] — 2026-03-03
 
 ### 变更

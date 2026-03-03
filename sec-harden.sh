@@ -62,15 +62,15 @@ log() {
         ERROR) color="$RED"    ;;
         STEP)  color="$CYAN"   ;;
     esac
-    printf "${color}[%s] [%-5s] %s${NC}\n" "$ts" "$level" "$*" | tee -a "$LOG_FILE"
+    printf '%b[%s] [%-5s] %s%b\n' "$color" "$ts" "$level" "$*" "$NC" | tee -a "$LOG_FILE"
 }
 
 step_banner() {
     local num=$1; shift
     echo "" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}  步骤 %s: %s${NC}\n" "$num" "$*" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════${NC}\n" | tee -a "$LOG_FILE"
+    printf '%b═══════════════════════════════════════════════════════════════%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '%b  步骤 %s: %s%b\n' "${BOLD}${CYAN}" "$num" "$*" "$NC" | tee -a "$LOG_FILE"
+    printf '%b═══════════════════════════════════════════════════════════════%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
 }
 
 check_result() {
@@ -78,10 +78,10 @@ check_result() {
     TOTAL_COUNT=$((TOTAL_COUNT + 1))
     if [[ "$result" == "pass" ]]; then
         PASS_COUNT=$((PASS_COUNT + 1))
-        printf "  ${GREEN}✓${NC} %s\n" "$desc" | tee -a "$LOG_FILE"
+        printf '  %b✓%b %s\n' "${GREEN}" "${NC}" "$desc" | tee -a "$LOG_FILE"
     else
         FAIL_COUNT=$((FAIL_COUNT + 1))
-        printf "  ${RED}✗${NC} %s\n" "$desc" | tee -a "$LOG_FILE"
+        printf '  %b✗%b %s\n' "${RED}" "${NC}" "$desc" | tee -a "$LOG_FILE"
     fi
 }
 
@@ -93,8 +93,8 @@ confirm_dangerous() {
         return 0
     fi
     echo "" | tee -a "$LOG_FILE"
-    printf "  ${YELLOW}⚠ 危险操作: %s${NC}\n" "$msg" | tee -a "$LOG_FILE"
-    printf "  ${BOLD}确认继续? [y/N]: ${NC}"
+    printf '  %b⚠ 危险操作: %s%b\n' "${YELLOW}" "${NC}" "$msg" | tee -a "$LOG_FILE"
+    printf '  %b确认继续? [y/N]: %b' "${BOLD}" "${NC}"
     read -r answer </dev/tty 2>/dev/null || answer="n"
     case "$answer" in
         [yY]*) return 0 ;;
@@ -263,11 +263,11 @@ harden_ssh() {
     # ⚠ 防锁定: 检查是否存在有 sudo 权限的非 root 用户
     local has_sudo_user=false
     local u
-    for u in $(awk -F: '$3>=1000 && $7!~/nologin|false/{print $1}' /etc/passwd); do
+    while IFS= read -r u; do
         if groups "$u" 2>/dev/null | grep -qE '\b(sudo|wheel)\b'; then
             has_sudo_user=true; break
         fi
-    done
+    done < <(awk -F: '$3>=1000 && $7!~/nologin|false/{print $1}' /etc/passwd)
     if [[ "$has_sudo_user" == false && "$has_keys" == false ]]; then
         ssh_config+="PermitRootLogin yes\n"
         log "WARN" "⚠ 无 sudo 用户且无 SSH 密钥，保留 root 完整登录（请尽快创建普通用户并配置密钥）"
@@ -378,6 +378,8 @@ EOF
     fi
 
     # 验证配置并重启（非 reload，确保新端口生效）
+    # 确保 sshd 权限分离目录存在 (某些环境 /run/sshd 可能未创建)
+    [[ ! -d /run/sshd ]] && mkdir -p /run/sshd
     if sshd -t 2>/dev/null; then
         # ⚠ 防锁定: 如果 UFW 已启用，先放行新端口再重启 SSH
         if ufw status 2>/dev/null | grep -qi 'active'; then
@@ -1067,7 +1069,11 @@ EOF
 
     # 确保安全更新源已启用
     if [[ -f "$uu_conf" ]]; then
-        sed -i 's|//\s*"${distro_id}:${distro_codename}-security"|"${distro_id}:${distro_codename}-security"|' "$uu_conf"
+        # shellcheck source=/dev/null
+        . /etc/os-release
+        local distro_id="${ID:-ubuntu}"
+        local distro_codename="${VERSION_CODENAME:-$(lsb_release -cs 2>/dev/null || echo jammy)}"
+        sed -i "s|//\\s*\"${distro_id}:${distro_codename}-security\"|\"${distro_id}:${distro_codename}-security\"|" "$uu_conf"
     fi
 
     systemctl enable unattended-upgrades >/dev/null 2>&1
@@ -1374,9 +1380,9 @@ lockdown_mta() {
 ###############################################################################
 run_verification() {
     echo "" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════════╗${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}║                      验  证  结  果                          ║${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════════╝${NC}\n" | tee -a "$LOG_FILE"
+    printf '%b╔═══════════════════════════════════════════════════════════════╗%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '%b║                      验  证  结  果                          ║%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '%b╚═══════════════════════════════════════════════════════════════╝%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
 
     PASS_COUNT=0; FAIL_COUNT=0; TOTAL_COUNT=0
 
@@ -1450,8 +1456,8 @@ run_verification() {
     if [[ $TOTAL_COUNT -gt 0 ]]; then
         rate=$((PASS_COUNT * 100 / TOTAL_COUNT))
     fi
-    printf "${BOLD}验证结果: ${GREEN}✓ %d 通过${NC} / ${RED}✗ %d 失败${NC} / 共 %d 项 (通过率 %d%%)${NC}\n" \
-        "$PASS_COUNT" "$FAIL_COUNT" "$TOTAL_COUNT" "$rate" | tee -a "$LOG_FILE"
+    printf '%b验证结果: %b✓ %d 通过%b / %b✗ %d 失败%b / 共 %d 项 (通过率 %d%%)%b\n' \
+        "$BOLD" "$GREEN" "$PASS_COUNT" "$NC" "$RED" "$FAIL_COUNT" "$NC" "$TOTAL_COUNT" "$rate" "$NC" | tee -a "$LOG_FILE"
 }
 
 ###############################################################################
@@ -1526,7 +1532,7 @@ YAMLEOF
 ###############################################################################
 show_current_status() {
     echo ""
-    printf "${BOLD}${CYAN}═══ 当前系统安全状态 ═══${NC}\n"
+    printf '%b═══ 当前系统安全状态 ═══%b\n' "${BOLD}${CYAN}" "${NC}"
     echo ""
 
     # SSH
@@ -1535,28 +1541,28 @@ show_current_status() {
     [[ -z "$cur_ssh_port" ]] && cur_ssh_port="22"
     local cur_pwd_auth
     cur_pwd_auth=$(grep -E '^PasswordAuthentication' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "yes")
-    printf "  SSH 端口: ${YELLOW}%s${NC}  |  密码登录: ${YELLOW}%s${NC}\n" "$cur_ssh_port" "$cur_pwd_auth"
+    printf '  SSH 端口: %b%s%b  |  密码登录: %b%s%b\n' "${YELLOW}" "$cur_ssh_port" "${NC}" "${YELLOW}" "$cur_pwd_auth" "${NC}"
 
     # UFW
     local ufw_status
     ufw_status=$(ufw status 2>/dev/null | head -1 || echo "未安装")
-    printf "  防火墙: ${YELLOW}%s${NC}\n" "$ufw_status"
+    printf '  防火墙: %b%s%b\n' "${YELLOW}" "$ufw_status" "${NC}"
 
     # Fail2ban
     local f2b_status="未安装"
     if systemctl is-active fail2ban &>/dev/null; then f2b_status="运行中";
     elif command -v fail2ban-client &>/dev/null; then f2b_status="已安装未运行"; fi
-    printf "  Fail2ban: ${YELLOW}%s${NC}\n" "$f2b_status"
+    printf '  Fail2ban: %b%s%b\n' "${YELLOW}" "$f2b_status" "${NC}"
 
     # Docker 容器
     local docker_count
     docker_count=$( { docker ps -q 2>/dev/null || true; } | wc -l )
-    printf "  Docker 容器: ${YELLOW}%s 运行中${NC}\n" "$docker_count"
+    printf '  Docker 容器: %b%s 运行中%b\n' "${YELLOW}" "$docker_count" "${NC}"
 
     # 1Panel
     local panel_ports
     panel_ports=$(detect_1panel_ports)
-    printf "  1Panel 端口: ${YELLOW}%s${NC}\n" "${panel_ports:-未检测到}"
+    printf '  1Panel 端口: %b%s%b\n' "${YELLOW}" "${panel_ports:-未检测到}" "${NC}"
 
     echo ""
 }
@@ -1567,11 +1573,11 @@ show_current_status() {
 interactive_menu() {
     show_current_status
 
-    printf "${BOLD}${CYAN}═══ 安全加固配置 ═══${NC}\n"
+    printf '%b═══ 安全加固配置 ═══%b\n' "${BOLD}${CYAN}" "${NC}"
     echo ""
 
     # SSH 模式
-    printf "  SSH 模式 [${YELLOW}1${NC}=生产模式(禁止转发) / ${YELLOW}2${NC}=开发模式(允许转发，兼容VSCode)]: "
+    printf '  SSH 模式 [%b1%b=生产模式(禁止转发) / %b2%b=开发模式(允许转发，兼容VSCode)]: ' "${YELLOW}" "${NC}" "${YELLOW}" "${NC}"
     read -r ssh_choice
     case "$ssh_choice" in
         2) SSH_MODE="dev" ;;
@@ -1579,12 +1585,12 @@ interactive_menu() {
     esac
 
     # SSH 端口
-    printf "  SSH 端口 [默认 ${YELLOW}$SSH_PORT${NC}]: "
+    printf '  SSH 端口 [默认 %b%s%b]: ' "$YELLOW" "$SSH_PORT" "$NC"
     read -r port_input
     [[ -n "$port_input" ]] && SSH_PORT="$port_input"
 
     # 放行 HTTP/HTTPS
-    printf "  放行 80/443 端口? [${YELLOW}Y${NC}/n]: "
+    printf '  放行 80/443 端口? [%bY%b/n]: ' "${YELLOW}" "${NC}"
     read -r http_choice
     case "$http_choice" in
         [nN]*) ALLOW_HTTP="no" ;;
@@ -1592,7 +1598,7 @@ interactive_menu() {
     esac
 
     # 禁用 IPv6
-    printf "  禁用 IPv6? [y/${YELLOW}N${NC}]: "
+    printf '  禁用 IPv6? [y/%bN%b]: ' "${YELLOW}" "${NC}"
     read -r ipv6_choice
     case "$ipv6_choice" in
         [yY]*) DISABLE_IPV6="yes" ;;
@@ -1600,7 +1606,7 @@ interactive_menu() {
     esac
 
     # 禁用 Ping
-    printf "  禁止 ICMP Ping? [y/${YELLOW}N${NC}]: "
+    printf '  禁止 ICMP Ping? [y/%bN%b]: ' "${YELLOW}" "${NC}"
     read -r ping_choice
     case "$ping_choice" in
         [yY]*) DISABLE_PING="yes" ;;
@@ -1613,12 +1619,12 @@ interactive_menu() {
     [[ -n "$ip_input" ]] && RESTRICT_IP="$ip_input"
 
     echo ""
-    printf "${BOLD}配置确认:${NC}\n"
+    printf '%b配置确认:%b\n' "${BOLD}" "${NC}"
     printf "  SSH: 端口=%s, 模式=%s\n" "$SSH_PORT" "$SSH_MODE"
     printf "  HTTP: %s  IPv6: %s  Ping: %s\n" "$ALLOW_HTTP" "$DISABLE_IPV6" "$DISABLE_PING"
     printf "  限制IP: %s\n" "${RESTRICT_IP:-无}"
     echo ""
-    printf "  按 ${YELLOW}Enter${NC} 开始执行，${YELLOW}Ctrl+C${NC} 取消..."
+    printf '  按 %bEnter%b 开始执行，%bCtrl+C%b 取消...' "${YELLOW}" "${NC}" "${YELLOW}" "${NC}"
     read -r
 }
 
@@ -1630,15 +1636,15 @@ show_final_summary() {
     [[ $TOTAL_COUNT -gt 0 ]] && rate=$((PASS_COUNT * 100 / TOTAL_COUNT))
 
     echo "" | tee -a "$LOG_FILE"
-    printf "${BOLD}${GREEN}╔═══════════════════════════════════════════════════════════════╗${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${GREEN}║                   安全加固完成                               ║${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${GREEN}╚═══════════════════════════════════════════════════════════════╝${NC}\n" | tee -a "$LOG_FILE"
+    printf '%b╔═══════════════════════════════════════════════════════════════╗%b\n' "${BOLD}${GREEN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '%b║                   安全加固完成                               ║%b\n' "${BOLD}${GREEN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '%b╚═══════════════════════════════════════════════════════════════╝%b\n' "${BOLD}${GREEN}" "${NC}" | tee -a "$LOG_FILE"
 
     # ── 前后对比表 ──
     echo "" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}┌─────────────────────┬──────────────────┬──────────────────┐${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}│ %-19s │ %-16s │ %-16s │${NC}\n" "项目" "加固前" "加固后" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}├─────────────────────┼──────────────────┼──────────────────┤${NC}\n" | tee -a "$LOG_FILE"
+    printf '%b┌─────────────────────┬──────────────────┬──────────────────┐%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '%b│ %-19s │ %-16s │ %-16s │%b\n' "${BOLD}${CYAN}" "项目" "加固前" "加固后" "${NC}" | tee -a "$LOG_FILE"
+    printf '%b├─────────────────────┼──────────────────┼──────────────────┤%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
 
     local after_port after_pwd after_root after_ufw after_f2b after_sync after_aslr after_core after_audit
     after_port=$(grep -E '^Port ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "?")
@@ -1651,7 +1657,7 @@ show_final_summary() {
     after_core=$(sysctl -n fs.suid_dumpable 2>/dev/null || echo "?")
     after_audit=$(systemctl is-active auditd 2>/dev/null || echo "?")
 
-    _row() { printf "${CYAN}│${NC} %-19s ${CYAN}│${NC} %-16s ${CYAN}│${NC} ${GREEN}%-16s${NC} ${CYAN}│${NC}\n" "$1" "$2" "$3" | tee -a "$LOG_FILE"; }
+    _row() { printf '%b│%b %-19s %b│%b %-16s %b│%b %b%-16s%b %b│%b\n' "$CYAN" "$NC" "$1" "$CYAN" "$NC" "$2" "$CYAN" "$NC" "$GREEN" "$3" "$NC" "$CYAN" "$NC" | tee -a "$LOG_FILE"; }
     _row "SSH 端口"        "${BEFORE_STATE[ssh_port]:-?}"     "$after_port"
     _row "密码登录"        "${BEFORE_STATE[ssh_pwd_auth]:-?}" "$after_pwd"
     _row "Root 登录"       "${BEFORE_STATE[ssh_root_login]:-?}" "$after_root"
@@ -1662,32 +1668,32 @@ show_final_summary() {
     _row "核心转储"        "${BEFORE_STATE[core_dump]:-?}"     "$after_core"
     _row "审计 auditd"     "${BEFORE_STATE[auditd]:-?}"       "$after_audit"
 
-    printf "${BOLD}${CYAN}└─────────────────────┴──────────────────┴──────────────────┘${NC}\n" | tee -a "$LOG_FILE"
+    printf '%b└─────────────────────┴──────────────────┴──────────────────┘%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
 
     # ── 验证通过率 ──
     echo "" | tee -a "$LOG_FILE"
-    printf "  ${BOLD}验证通过率: ${GREEN}%d/%d (%d%%)${NC}\n" "$PASS_COUNT" "$TOTAL_COUNT" "$rate" | tee -a "$LOG_FILE"
+    printf '  %b验证通过率: %b%d/%d (%d%%)%b\n' "$BOLD" "$GREEN" "$PASS_COUNT" "$TOTAL_COUNT" "$rate" "$NC" | tee -a "$LOG_FILE"
 
     # ── 你得到了什么 ──
     echo "" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}═══ 本次加固为你带来 ═══${NC}\n" | tee -a "$LOG_FILE"
-    printf "  ${GREEN}✓${NC} SSH 强化: 端口 %s, Ed25519 优先, 限制登录尝试\n" "$after_port" | tee -a "$LOG_FILE"
-    printf "  ${GREEN}✓${NC} 防火墙: UFW 仅放行必要端口, Docker 兼容\n" | tee -a "$LOG_FILE"
-    printf "  ${GREEN}✓${NC} 暴力防护: Fail2ban %s次重试/%ss封禁\n" "$FAIL2BAN_MAXRETRY" "$FAIL2BAN_BANTIME" | tee -a "$LOG_FILE"
-    printf "  ${GREEN}✓${NC} 内核加固: SYN cookies, ASLR, ptrace 限制, 禁用危险模块\n" | tee -a "$LOG_FILE"
-    printf "  ${GREEN}✓${NC} 文件安全: SUID 清理, /etc/shadow 600, 关键目录加固\n" | tee -a "$LOG_FILE"
-    printf "  ${GREEN}✓${NC} 攻击面缩减: 禁用不必要服务, 核心转储, su/shell 限制\n" | tee -a "$LOG_FILE"
-    printf "  ${GREEN}✓${NC} 审计追踪: auditd 全面规则, 自动更新, 登录横幅\n" | tee -a "$LOG_FILE"
+    printf '%b═══ 本次加固为你带来 ═══%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '  %b✓%b SSH 强化: 端口 %s, Ed25519 优先, 限制登录尝试\n' "${GREEN}" "${NC}" "$after_port" | tee -a "$LOG_FILE"
+    printf '  %b✓%b 防火墙: UFW 仅放行必要端口, Docker 兼容\n' "${GREEN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '  %b✓%b 暴力防护: Fail2ban %s次重试/%ss封禁\n' "${GREEN}" "${NC}" "$FAIL2BAN_MAXRETRY" "$FAIL2BAN_BANTIME" | tee -a "$LOG_FILE"
+    printf '  %b✓%b 内核加固: SYN cookies, ASLR, ptrace 限制, 禁用危险模块\n' "${GREEN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '  %b✓%b 文件安全: SUID 清理, /etc/shadow 600, 关键目录加固\n' "${GREEN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '  %b✓%b 攻击面缩减: 禁用不必要服务, 核心转储, su/shell 限制\n' "${GREEN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '  %b✓%b 审计追踪: auditd 全面规则, 自动更新, 登录横幅\n' "${GREEN}" "${NC}" | tee -a "$LOG_FILE"
     if [[ "$INSTALL_AIDE" == "yes" ]]; then
-        printf "  ${GREEN}✓${NC} 完整性检测: AIDE 每日检查\n" | tee -a "$LOG_FILE"
+        printf '  %b✓%b 完整性检测: AIDE 每日检查\n' "${GREEN}" "${NC}" | tee -a "$LOG_FILE"
     fi
     if [[ "$INSTALL_RKHUNTER" == "yes" ]]; then
-        printf "  ${GREEN}✓${NC} Rootkit 扫描: rkhunter 每周扫描\n" | tee -a "$LOG_FILE"
+        printf '  %b✓%b Rootkit 扫描: rkhunter 每周扫描\n' "${GREEN}" "${NC}" | tee -a "$LOG_FILE"
     fi
 
     # ── 生成的文件 ──
     echo "" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}═══ 生成的文件 ═══${NC}\n" | tee -a "$LOG_FILE"
+    printf '%b═══ 生成的文件 ═══%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
     printf "  日志文件:    %s\n" "$LOG_FILE" | tee -a "$LOG_FILE"
     printf "  诊断报告:    %s\n" "$DIAG_FILE" | tee -a "$LOG_FILE"
     printf "  回滚脚本:    %s\n" "$ROLLBACK_SCRIPT" | tee -a "$LOG_FILE"
@@ -1695,10 +1701,10 @@ show_final_summary() {
 
     # ── 重要提示 ──
     echo "" | tee -a "$LOG_FILE"
-    printf "${YELLOW}⚠ 重要提示:${NC}\n" | tee -a "$LOG_FILE"
-    printf "  1. SSH 端口: ${BOLD}%s${NC} — 请确保新端口可连接后再断开当前会话\n" "$after_port" | tee -a "$LOG_FILE"
-    printf "  2. 新SSH连接: ${BOLD}ssh -p %s user@host${NC}\n" "$after_port" | tee -a "$LOG_FILE"
-    printf "  3. 如需回滚: ${BOLD}sudo bash %s${NC}\n" "$ROLLBACK_SCRIPT" | tee -a "$LOG_FILE"
+    printf '%b⚠ 重要提示:%b\n' "${YELLOW}" "${NC}" | tee -a "$LOG_FILE"
+    printf '  1. SSH 端口: %b%s%b — 请确保新端口可连接后再断开当前会话\n' "${BOLD}" "$after_port" "${NC}" | tee -a "$LOG_FILE"
+    printf '  2. 新SSH连接: %bssh -p %s user@host%b\n' "${BOLD}" "$after_port" "${NC}" | tee -a "$LOG_FILE"
+    printf '  3. 如需回滚: %bsudo bash %s%b\n' "${BOLD}" "$ROLLBACK_SCRIPT" "${NC}" | tee -a "$LOG_FILE"
     if [[ "${BEFORE_STATE[docker_count]:-0}" -gt 0 ]]; then
         printf "  4. Docker 容器 (%s个) 不受影响\n" "${BEFORE_STATE[docker_count]}" | tee -a "$LOG_FILE"
     fi
@@ -1733,11 +1739,11 @@ main() {
     init_backup
     capture_before_state
 
-    printf "${BOLD}${GREEN}"
+    printf '%b' "${BOLD}${GREEN}"
     printf "╔═══════════════════════════════════════════════════════════════╗\n"
-    printf "║       Ubuntu 服务器安全加固脚本 sec-harden.sh v$SCRIPT_VERSION      ║\n"
+    printf '║       Ubuntu 服务器安全加固脚本 sec-harden.sh v%s      ║\n' "$SCRIPT_VERSION"
     printf "╚═══════════════════════════════════════════════════════════════╝\n"
-    printf "${NC}\n"
+    printf '%b\n' "${NC}"
 
     # 交互或自动模式
     if [[ "$AUTO_MODE" != "yes" ]]; then

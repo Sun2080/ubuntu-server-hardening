@@ -12,7 +12,7 @@
 ###############################################################################
 set -Euo pipefail
 SCRIPT_VERSION="1.0"
-
+# NOTE: lib/common.sh 提供了可共享的公共函数，当前脚本仍使用内联定义以保持独立可用
 # ─── ERR trap ────────────────────────────────────────────────────────────────
 trap '_err_handler $LINENO "$BASH_COMMAND"' ERR
 _err_handler() {
@@ -45,15 +45,15 @@ log() {
         ERROR) color="$RED"    ;;
         STEP)  color="$CYAN"   ;;
     esac
-    printf "${color}[%s] [%-5s] %s${NC}\n" "$ts" "$level" "$*" | tee -a "$LOG_FILE"
+    printf '%b[%s] [%-5s] %s%b\n' "$color" "$ts" "$level" "$*" "$NC" | tee -a "$LOG_FILE"
 }
 
 step_banner() {
     local num=$1; shift
     echo "" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}  步骤 %s: %s${NC}\n" "$num" "$*" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════${NC}\n" | tee -a "$LOG_FILE"
+    printf '%b═══════════════════════════════════════════════════════════════%b\n' "${BOLD}${CYAN}" "$NC" | tee -a "$LOG_FILE"
+    printf '%b  步骤 %s: %s%b\n' "${BOLD}${CYAN}" "$num" "$*" "$NC" | tee -a "$LOG_FILE"
+    printf '%b═══════════════════════════════════════════════════════════════%b\n' "${BOLD}${CYAN}" "$NC" | tee -a "$LOG_FILE"
 }
 
 confirm_action() {
@@ -63,8 +63,8 @@ confirm_action() {
         return 0
     fi
     echo "" | tee -a "$LOG_FILE"
-    printf "  ${YELLOW}▸ %s${NC}\n" "$msg" | tee -a "$LOG_FILE"
-    printf "  ${BOLD}确认继续? [Y/n]: ${NC}"
+    printf '  %b▸ %s%b\n' "$YELLOW" "$msg" "$NC" | tee -a "$LOG_FILE"
+    printf '  %b确认继续? [Y/n]: %b' "$BOLD" "$NC"
     read -r answer </dev/tty 2>/dev/null || answer="y"
     case "$answer" in
         [nN]*) log "WARN" "用户取消: $msg"; return 1 ;;
@@ -242,7 +242,7 @@ test_internal_mirror() {
 # ─── 交互选择镜像（非 auto 模式）──────────────────────────────────────────────
 select_mirror_interactive() {
     echo ""
-    printf "${BOLD}请选择镜像源:${NC}\n"
+    printf '%b请选择镜像源:%b\n' "${BOLD}" "${NC}"
     echo "  1) 腾讯云 (内网优先)"
     echo "  2) 阿里云 (内网优先)"
     echo "  3) 华为云 (内网优先)"
@@ -250,7 +250,7 @@ select_mirror_interactive() {
     echo "  5) 清华 TUNA"
     echo "  0) 跳过换源（仅执行系统更新）"
     echo ""
-    printf "  ${BOLD}请输入 [0-5]: ${NC}"
+    printf '  %b请输入 [0-5]: %b' "${BOLD}" "${NC}"
     local choice
     read -r choice </dev/tty 2>/dev/null || choice="1"
     case "$choice" in
@@ -327,36 +327,15 @@ configure_docker_mirror() {
     mkdir -p /etc/docker
 
     if [[ -f "$daemon_json" ]]; then
-        # 已有配置 — 用 jq 或 python3 合并 registry-mirrors
+        # 已有配置 — 用 python3 合并 registry-mirrors
         if command -v python3 &>/dev/null; then
-            local tmp_json; tmp_json=$(mktemp)
-            python3 -c "
-import json, sys
-try:
-    with open('$daemon_json') as f:
-        cfg = json.load(f)
-except (json.JSONDecodeError, FileNotFoundError):
-    cfg = {}
-mirrors = cfg.get('registry-mirrors', [])
-new_mirror = '$docker_url'
-if new_mirror not in mirrors:
-    mirrors.insert(0, new_mirror)
-    cfg['registry-mirrors'] = mirrors
-    with open('$tmp_json', 'w') as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
-    print('updated')
-else:
-    with open('$tmp_json', 'w') as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
-    print('exists')
-" 2>/dev/null
             local result
             result=$(python3 -c "
 import json
 try:
     with open('$daemon_json') as f:
         cfg = json.load(f)
-except:
+except (json.JSONDecodeError, FileNotFoundError):
     cfg = {}
 mirrors = cfg.get('registry-mirrors', [])
 print('exists' if '$docker_url' in mirrors else 'missing')
@@ -368,7 +347,7 @@ import json
 try:
     with open('$daemon_json') as f:
         cfg = json.load(f)
-except:
+except (json.JSONDecodeError, FileNotFoundError):
     cfg = {}
 mirrors = cfg.get('registry-mirrors', [])
 mirrors.insert(0, '$docker_url')
@@ -380,7 +359,6 @@ with open('$daemon_json', 'w') as f:
             else
                 log "INFO" "Docker Hub 加速已存在: $docker_url"
             fi
-            rm -f "$tmp_json"
         else
             log "WARN" "无 python3，跳过 Docker 镜像配置（避免破坏现有 daemon.json）"
             return 0
@@ -448,9 +426,9 @@ safe_system_upgrade() {
     # 检查是否需要重启
     if [[ -f /var/run/reboot-required ]]; then
         echo "" | tee -a "$LOG_FILE"
-        printf "  ${YELLOW}⚠ 内核已更新，建议重启服务器使其生效${NC}\n" | tee -a "$LOG_FILE"
+        printf '  %b⚠ 内核已更新，建议重启服务器使其生效%b\n' "${YELLOW}" "${NC}" | tee -a "$LOG_FILE"
         if [[ -f /var/run/reboot-required.pkgs ]]; then
-            printf "  ${YELLOW}  需要重启的包: $(cat /var/run/reboot-required.pkgs | tr '\n' ' ')${NC}\n" | tee -a "$LOG_FILE"
+            printf "  %b  需要重启的包: %s%b\n" "$YELLOW" "$(tr '\n' ' ' < /var/run/reboot-required.pkgs)" "$NC" | tee -a "$LOG_FILE"
         fi
         log "WARN" "系统需要重启以完成内核更新"
     else
@@ -467,21 +445,21 @@ run_verification() {
     # 1. 检查源文件
     total=$((total + 1))
     if [[ -f "$SOURCE_FILE" ]] && grep -q "$MIRROR_URL" "$SOURCE_FILE" 2>/dev/null; then
-        printf "  ${GREEN}✓${NC} APT 源已切换到 %s\n" "$MIRROR_URL" | tee -a "$LOG_FILE"
+        printf '  %b✓%b APT 源已切换到 %s\n' "${GREEN}" "${NC}" "$MIRROR_URL" | tee -a "$LOG_FILE"
         pass=$((pass + 1))
     elif [[ "${MIRROR:-}" == "skip" ]]; then
-        printf "  ${YELLOW}—${NC} APT 源: 用户跳过\n" | tee -a "$LOG_FILE"
+        printf '  %b—%b APT 源: 用户跳过\n' "${YELLOW}" "${NC}" | tee -a "$LOG_FILE"
         pass=$((pass + 1))
     else
-        printf "  ${RED}✗${NC} APT 源未正确写入\n" | tee -a "$LOG_FILE"
+        printf '  %b✗%b APT 源未正确写入\n' "${RED}" "${NC}" | tee -a "$LOG_FILE"
     fi
 
     # 2. 检查 apt update 成功
     total=$((total + 1))
     if apt-get update -qq 2>&1 | grep -qiE 'err|fail'; then
-        printf "  ${RED}✗${NC} apt update 有错误\n" | tee -a "$LOG_FILE"
+        printf '  %b✗%b apt update 有错误\n' "${RED}" "${NC}" | tee -a "$LOG_FILE"
     else
-        printf "  ${GREEN}✓${NC} apt update 正常\n" | tee -a "$LOG_FILE"
+        printf '  %b✓%b apt update 正常\n' "${GREEN}" "${NC}" | tee -a "$LOG_FILE"
         pass=$((pass + 1))
     fi
 
@@ -489,30 +467,30 @@ run_verification() {
     total=$((total + 1))
     if [[ "$DOCKER_MIRROR" == "yes" ]] && command -v docker &>/dev/null; then
         if docker info 2>/dev/null | grep -q "Registry Mirrors\|registry-mirrors\|mirror"; then
-            printf "  ${GREEN}✓${NC} Docker Hub 镜像加速已生效\n" | tee -a "$LOG_FILE"
+            printf '  %b✓%b Docker Hub 镜像加速已生效\n' "${GREEN}" "${NC}" | tee -a "$LOG_FILE"
             pass=$((pass + 1))
         elif grep -q "registry-mirrors" /etc/docker/daemon.json 2>/dev/null; then
-            printf "  ${GREEN}✓${NC} Docker Hub 镜像加速已配置\n" | tee -a "$LOG_FILE"
+            printf '  %b✓%b Docker Hub 镜像加速已配置\n' "${GREEN}" "${NC}" | tee -a "$LOG_FILE"
             pass=$((pass + 1))
         else
-            printf "  ${YELLOW}—${NC} Docker Hub 镜像加速未配置\n" | tee -a "$LOG_FILE"
+            printf '  %b—%b Docker Hub 镜像加速未配置\n' "${YELLOW}" "${NC}" | tee -a "$LOG_FILE"
             pass=$((pass + 1))  # 非关键项
         fi
     else
-        printf "  ${YELLOW}—${NC} Docker 镜像加速: 跳过\n" | tee -a "$LOG_FILE"
+        printf '  %b—%b Docker 镜像加速: 跳过\n' "${YELLOW}" "${NC}" | tee -a "$LOG_FILE"
         pass=$((pass + 1))
     fi
 
     echo "" | tee -a "$LOG_FILE"
-    printf "${BOLD}验证结果: ${GREEN}%d${NC}/${BOLD}%d${NC} 通过\n" "$pass" "$total" | tee -a "$LOG_FILE"
+    printf '%b验证结果: %b%d%b/%b%d%b 通过\n' "$BOLD" "$GREEN" "$pass" "$NC" "$BOLD" "$total" "$NC" | tee -a "$LOG_FILE"
 }
 
 # ─── 结果摘要 ────────────────────────────────────────────────────────────────
 print_summary() {
     echo "" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}  init-mirror.sh v${SCRIPT_VERSION} — 执行摘要${NC}\n" | tee -a "$LOG_FILE"
-    printf "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════${NC}\n" | tee -a "$LOG_FILE"
+    printf '%b═══════════════════════════════════════════════════════════════%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
+    printf '%b  init-mirror.sh v%s — 执行摘要%b\n' "${BOLD}${CYAN}" "$SCRIPT_VERSION" "$NC" | tee -a "$LOG_FILE"
+    printf '%b═══════════════════════════════════════════════════════════════%b\n' "${BOLD}${CYAN}" "${NC}" | tee -a "$LOG_FILE"
 
     local mirror_display
     if [[ "${MIRROR:-}" == "skip" ]]; then
@@ -531,11 +509,11 @@ print_summary() {
 
     if [[ -f /var/run/reboot-required ]]; then
         echo "" | tee -a "$LOG_FILE"
-        printf "  ${YELLOW}⚠ 建议重启: sudo reboot${NC}\n" | tee -a "$LOG_FILE"
+        printf '  %b⚠ 建议重启: sudo reboot%b\n' "${YELLOW}" "${NC}" | tee -a "$LOG_FILE"
     fi
 
     echo "" | tee -a "$LOG_FILE"
-    printf "  ${GREEN}下一步:${NC}\n" | tee -a "$LOG_FILE"
+    printf '  %b下一步:%b\n' "${GREEN}" "${NC}" | tee -a "$LOG_FILE"
     printf "    sudo bash sec-harden.sh --auto    # 安全加固\n" | tee -a "$LOG_FILE"
     printf "    sudo bash web-optimize.sh --auto  # 性能优化\n" | tee -a "$LOG_FILE"
     echo "" | tee -a "$LOG_FILE"
@@ -568,9 +546,9 @@ main() {
     done
 
     echo ""
-    printf "${BOLD}${GREEN}╔═══════════════════════════════════════════════════════════╗${NC}\n"
-    printf "${BOLD}${GREEN}║   init-mirror.sh v%-6s — 换源 + 安全全量更新           ║${NC}\n" "$SCRIPT_VERSION"
-    printf "${BOLD}${GREEN}╚═══════════════════════════════════════════════════════════╝${NC}\n"
+    printf '%b╔═══════════════════════════════════════════════════════════╗%b\n' "${BOLD}${GREEN}" "${NC}"
+    printf '%b║   init-mirror.sh v%-6s — 换源 + 安全全量更新           ║%b\n' "${BOLD}${GREEN}" "${NC}" "$SCRIPT_VERSION"
+    printf '%b╚═══════════════════════════════════════════════════════════╝%b\n' "${BOLD}${GREEN}" "${NC}"
     echo ""
 
     check_root
@@ -595,7 +573,7 @@ main() {
         else
             # 交互模式: 先检测再让用户选
             detect_cloud_provider
-            printf "\n  ${GREEN}检测建议: ${MIRROR_LABEL[$DETECTED_PROVIDER]}${NC}\n\n"
+            printf '\n  %b检测建议: %s%b\n\n' "$GREEN" "${MIRROR_LABEL[$DETECTED_PROVIDER]}" "$NC"
             select_mirror_interactive
             if [[ "$MIRROR" != "skip" ]]; then
                 SELECTED_PROVIDER="$MIRROR"
